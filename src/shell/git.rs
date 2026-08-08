@@ -160,26 +160,35 @@ pub fn is_clean(inv: &mut Invoker, worktree: &Path) -> Result<bool> {
     Ok(out.trim().is_empty())
 }
 
-/// Merge `branch` into `integration` without touching any working tree.
+/// A merge that has been computed but not applied.
+///
+/// Producing one touches no ref and no file, which is what lets `--dry-run`
+/// (`#REQ-009`) be the same computation as the merge with [`apply_merge`]
+/// omitted, rather than a second implementation that can disagree with it.
+#[derive(Debug, Clone)]
+pub struct MergePlan {
+    /// `Merged` here means "would merge cleanly".
+    pub outcome: MergeOutcome,
+    pub conflicts: Vec<String>,
+    tree: Option<String>,
+    before: String,
+    head: String,
+    full: String,
+    occupied: Option<std::path::PathBuf>,
+}
+
+/// Compute the merge of `branch` into `integration`, applying nothing.
 ///
 /// `git merge-tree --write-tree` computes the merge in the object database and
 /// reports a conflict by exit status, so on the conflict path the integration
 /// ref and every worktree are untouched by construction rather than by a
 /// cleanup step — which is exactly what `#REQ-005.d` requires.
-///
-/// The ref then moves by `git update-ref <ref> <new> <old>`, a
-/// compare-and-swap. The advisory lock of `#REQ-005.b` serialises Circus
-/// against Circus; the CAS additionally refuses to clobber a change made by
-/// anything else between the read and the write.
-///
-/// Nothing here rebases, amends, cherry-picks, force-updates, or pushes —
-/// `#REQ-005.e`.
-pub fn merge_into(
+pub fn plan_merge(
     inv: &mut Invoker,
     cwd: &Path,
     integration: &str,
     branch: &str,
-) -> Result<MergeReport> {
+) -> Result<MergePlan> {
     let full = full_ref(inv, cwd, integration)?;
     let before = commit_of(inv, cwd, integration)?;
     let head = commit_of(inv, cwd, branch)?;
@@ -226,10 +235,14 @@ pub fn merge_into(
             .skip(1)
             .filter_map(|l| l.split_once('\t').map(|(_, p)| p.trim().to_owned()))
             .collect();
-        return Ok(MergeReport {
+        return Ok(MergePlan {
             outcome: MergeOutcome::Conflict,
-            commit: None,
             conflicts,
+            tree: None,
+            before,
+            head,
+            full,
+            occupied,
         });
     }
 
@@ -241,16 +254,59 @@ pub fn merge_into(
         .ok_or_else(|| Error::software("git merge-tree produced no tree"))?
         .to_owned();
 
+    Ok(MergePlan {
+        outcome: MergeOutcome::Merged,
+        conflicts: Vec::new(),
+        tree: Some(tree),
+        before,
+        head,
+        full,
+        occupied,
+    })
+}
+
+/// Apply a plan that merged cleanly.
+///
+/// The ref moves by `git update-ref <ref> <new> <old>`, a compare-and-swap.
+/// The advisory lock of `#REQ-005.b` serialises Circus against Circus; the CAS
+/// additionally refuses to clobber a change made by anything else between the
+/// read and the write.
+///
+/// Nothing here rebases, amends, cherry-picks, force-updates, or pushes —
+/// `#REQ-005.e`.
+pub fn apply_merge(
+    inv: &mut Invoker,
+    cwd: &Path,
+    integration: &str,
+    branch: &str,
+    plan: &MergePlan,
+) -> Result<MergeReport> {
+    let MergePlan {
+        tree,
+        before,
+        head,
+        full,
+        occupied,
+        ..
+    } = plan;
+    let Some(tree) = tree else {
+        return Ok(MergeReport {
+            outcome: MergeOutcome::Conflict,
+            commit: None,
+            conflicts: plan.conflicts.clone(),
+        });
+    };
+
     let message = format!("Merge {branch} into {integration}\n\nMerged by circus.\n");
     let commit = inv.run_ok_in(
         "git",
         &[
             "commit-tree",
-            &tree,
+            tree,
             "-p",
-            &before,
+            before,
             "-p",
-            &head,
+            head,
             "-m",
             &message,
         ],
@@ -259,7 +315,7 @@ pub fn merge_into(
 
     let out = inv.run_in(
         "git",
-        &["update-ref", "-m", "circus merge", &full, &commit, &before],
+        &["update-ref", "-m", "circus merge", full, &commit, before],
         Some(cwd),
     )?;
     if !out.status.success() {
@@ -278,12 +334,8 @@ pub fn merge_into(
     // commits, and it refuses rather than clobbers if a local change is in the
     // way. `reset --keep HEAD` cannot do this job, because HEAD already points
     // at the new commit and the reset would compute an empty difference.
-    if let Some(wt) = &occupied {
-        let out = inv.run_in(
-            "git",
-            &["read-tree", "-m", "-u", &before, &commit],
-            Some(wt),
-        )?;
+    if let Some(wt) = occupied {
+        let out = inv.run_in("git", &["read-tree", "-m", "-u", before, &commit], Some(wt))?;
         if !out.status.success() {
             return Err(Error::software(format!(
                 "merged {commit}, but the checkout at {} could not be refreshed: {}",
@@ -298,6 +350,17 @@ pub fn merge_into(
         commit: Some(commit),
         conflicts: Vec::new(),
     })
+}
+
+/// Plan and apply in one step, for the ordinary merge path.
+pub fn merge_into(
+    inv: &mut Invoker,
+    cwd: &Path,
+    integration: &str,
+    branch: &str,
+) -> Result<MergeReport> {
+    let plan = plan_merge(inv, cwd, integration, branch)?;
+    apply_merge(inv, cwd, integration, branch, &plan)
 }
 
 #[cfg(test)]

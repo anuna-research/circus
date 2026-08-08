@@ -44,3 +44,11 @@ a daemon, a remote service, or an agent framework.
 
 Circus invokes the first three as external programs and records every
 invocation. It never invokes the fourth.
+
+## Conventions
+
+Circus follows the [Command Line Interface Guidelines](https://clig.dev/).
+Stdout carries data and stderr carries messaging, every command takes `-q`,
+`-v`, and `--no-color`, colour respects `NO_COLOR`, and `circus merge` takes
+`--dry-run`. Exit codes distinguish a bad argument from a failed tool from a
+recorded "no".

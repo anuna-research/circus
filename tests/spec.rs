@@ -1226,6 +1226,330 @@ fn test_028_roundtrips_the_run_record() {
     );
 }
 
+// ── REQ-008 / REQ-009: the command-line surface ────────────────────────────
+
+/// TEST-034 — REQ-008.a, REQ-008.b. Scope-invariant.
+#[test]
+fn test_034_keeps_the_two_streams_apart() {
+    let fx = Fx::new();
+
+    let p = fx.circus(&["prepare", "--task", "model", "--integration", INTEGRATION]);
+    p.ok();
+    // stdout is exactly one run record and nothing else.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&p.stdout).expect("stdout must parse as one record");
+    assert_eq!(parsed["attempt_id"], "model/1");
+    assert!(!p.stderr.is_empty(), "the state change should be reported");
+    assert!(
+        !p.stdout.contains("circus:"),
+        "no message leaked into stdout"
+    );
+
+    let id = "model/1";
+    let drv = fx.script(
+        "quick",
+        &format!("echo 0 > {}; sleep 30\n", fx.sentinel_of(id).display()),
+    );
+    let l = fx.circus(&[
+        "launch",
+        "--attempt",
+        id,
+        "--prompt",
+        fx.prompt(id).to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ]);
+    l.ok();
+    serde_json::from_str::<serde_json::Value>(&l.stdout).expect("stdout is one record");
+    assert!(!l.stdout.contains("circus:"));
+    assert!(l.stderr.contains("circus:"), "progress belongs on stderr");
+
+    // An argument error goes to stderr, leaving stdout empty. The wording is
+    // clap's rather than ours; what REQ-008 fixes is the stream, not the
+    // prefix.
+    let e = fx.circus(&["accept", "--attempt", id, "--evidence", "theory:q1"]);
+    assert_eq!(e.code, 64);
+    assert_eq!(
+        e.stdout, "",
+        "a failing command must write nothing to stdout"
+    );
+    assert!(
+        e.stderr.contains("verifier-record"),
+        "the error should name the missing argument: {}",
+        e.stderr
+    );
+
+    // And so does a recognition error, which is ours.
+    let g = fx.circus(&["prepare", "--task", "BAD", "--integration", INTEGRATION]);
+    assert_eq!(g.code, 64);
+    assert_eq!(g.stdout, "");
+    assert!(g.stderr.contains("circus:"), "{}", g.stderr);
+}
+
+/// TEST-035 — REQ-008.c. Positive.
+#[test]
+fn test_035_reports_the_attach_command_before_waiting() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+    let drv = fx.script("slow", "sleep 60\n");
+
+    let child = fx.circus_spawn(&[
+        "launch",
+        "--attempt",
+        &id,
+        "--prompt",
+        fx.prompt(&id).to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ]);
+    // The pane exists, so the hint has been printed and the wait has begun.
+    wait_until("the pane to appear", || {
+        fx.tmux(&["list-windows", "-a", "-F", "#{window_name}"])
+            .stdout
+            .contains("circus-model-1")
+    });
+    fs::write(fx.sentinel_of(&id), "0\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("tmux attach -t circus-model-1"),
+        "the attach command must be reported: {stderr}"
+    );
+    let attach = stderr.find("tmux attach").expect("attach hint");
+    let finished = stderr.find("finished").unwrap_or(usize::MAX);
+    assert!(
+        attach < finished,
+        "the hint must precede the outcome: {stderr}"
+    );
+}
+
+/// TEST-036 — REQ-008.d. Positive.
+#[test]
+fn test_036_reports_elapsed_time_while_an_attempt_runs() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+    // Longer than the first progress interval, short enough to keep the suite
+    // quick.
+    let drv = fx.script(
+        "lingering",
+        &format!("sleep 4; echo 0 > {}\n", fx.sentinel_of(&id).display()),
+    );
+
+    let r = fx.circus(&[
+        "launch",
+        "--attempt",
+        &id,
+        "--prompt",
+        fx.prompt(&id).to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ]);
+    r.ok();
+    assert!(
+        r.stderr.contains("running for"),
+        "elapsed time should be reported: {}",
+        r.stderr
+    );
+}
+
+/// TEST-037 — REQ-008.e. Prohibited-action.
+#[test]
+fn test_037_silences_everything_but_errors() {
+    let fx = Fx::new();
+
+    let ok = fx.circus(&[
+        "--quiet",
+        "prepare",
+        "--task",
+        "model",
+        "--integration",
+        INTEGRATION,
+    ]);
+    ok.ok();
+    assert_eq!(ok.stderr, "", "quiet must silence a successful command");
+    assert!(!ok.stdout.is_empty(), "the record must still reach stdout");
+    serde_json::from_str::<serde_json::Value>(&ok.stdout).expect("still a record");
+
+    // An error survives --quiet, because quiet silences messages, not failures.
+    let bad = fx.circus(&[
+        "--quiet",
+        "prepare",
+        "--task",
+        "BAD",
+        "--integration",
+        INTEGRATION,
+    ]);
+    assert_eq!(bad.code, 64);
+    assert!(!bad.stderr.is_empty(), "an error must survive --quiet");
+}
+
+/// TEST-038 — REQ-008.f. Positive.
+#[test]
+fn test_038_reports_invocations_under_verbose() {
+    let fx = Fx::new();
+
+    let v = fx.circus(&[
+        "--verbose",
+        "prepare",
+        "--task",
+        "loud",
+        "--integration",
+        INTEGRATION,
+    ]);
+    v.ok();
+    assert!(
+        v.stderr.contains("+ git"),
+        "verbose should name each invocation: {}",
+        v.stderr
+    );
+
+    let q = fx.circus(&["prepare", "--task", "quietly", "--integration", INTEGRATION]);
+    q.ok();
+    assert!(
+        !q.stderr.contains("+ git"),
+        "the default must not print invocations: {}",
+        q.stderr
+    );
+}
+
+/// TEST-039 — REQ-009.a. Positive.
+#[test]
+fn test_039_previews_a_conflicting_merge() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_complete("model");
+
+    let wt = fx.worktree_of(&id);
+    fs::write(wt.join("shared.txt"), "from the worker\n").unwrap();
+    fx.git_in(&wt, &["add", "-A"]).ok();
+    fx.git_in(&wt, &["commit", "-q", "-m", "worker"]).ok();
+    fx.git(&["checkout", "-q", INTEGRATION]).ok();
+    fs::write(fx.repo.join("shared.txt"), "from the trunk\n").unwrap();
+    fx.git(&["add", "-A"]).ok();
+    fx.git(&["commit", "-q", "-m", "trunk"]).ok();
+    fx.circus(&[
+        "accept",
+        "--attempt",
+        &id,
+        "--verifier-record",
+        fx.verifier_record(0).to_str().unwrap(),
+        "--evidence",
+        "theory:q1",
+    ])
+    .ok();
+
+    let r = fx.circus(&[
+        "merge",
+        "--attempt",
+        &id,
+        "--into",
+        INTEGRATION,
+        "--dry-run",
+    ]);
+
+    assert_ne!(r.code, 0, "a previewed conflict must not report success");
+    assert!(
+        r.stderr.contains("would conflict"),
+        "the preview must say so: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("shared.txt"),
+        "and name the path: {}",
+        r.stderr
+    );
+}
+
+/// TEST-040 — REQ-009.b. Prohibited-action, scope-invariant.
+#[test]
+fn test_040_a_preview_changes_nothing() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_accept("model", "work.txt");
+
+    let ref_before = fx.git(&["rev-parse", INTEGRATION]).stdout;
+    let record_before = fs::read(fx.attempt_dir(&id).join("record.json")).unwrap();
+    let reflog_before = fx.git(&["reflog", "show", INTEGRATION]).stdout;
+    let status_before = fx.git(&["status", "--porcelain"]).stdout;
+
+    let r = fx.circus(&["merge", "--attempt", &id, "--into", INTEGRATION, "-n"]);
+    r.ok();
+    assert!(r.stderr.contains("merges cleanly"), "{}", r.stderr);
+    assert!(r.stderr.contains("nothing changed"), "{}", r.stderr);
+
+    assert_eq!(
+        fx.git(&["rev-parse", INTEGRATION]).stdout,
+        ref_before,
+        "the ref moved"
+    );
+    assert_eq!(
+        fs::read(fx.attempt_dir(&id).join("record.json")).unwrap(),
+        record_before,
+        "the run record was written"
+    );
+    assert_eq!(
+        fx.git(&["reflog", "show", INTEGRATION]).stdout,
+        reflog_before
+    );
+    assert_eq!(fx.git(&["status", "--porcelain"]).stdout, status_before);
+    assert_eq!(fx.record(&id)["state"], "accepted", "the attempt advanced");
+    assert!(fx.record(&id)["merge"].is_null());
+
+    // And the real merge still works afterwards.
+    fx.circus(&["merge", "--attempt", &id, "--into", INTEGRATION])
+        .ok();
+    assert_eq!(fx.record(&id)["merge"]["result"], "merged");
+}
+
+/// TEST-041 — ADR-008. Negative.
+#[test]
+fn test_041_styles_only_a_terminal() {
+    let fx = Fx::new();
+    let esc = '\u{1b}';
+
+    // Captured output is never a terminal, so no run below should be styled.
+    let cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("piped", vec![]),
+        ("NO_COLOR", vec![("NO_COLOR", "1")]),
+        ("TERM=dumb", vec![("TERM", "dumb")]),
+    ];
+    for (name, env) in cases {
+        let task = format!("t{}", name.len());
+        let r = fx.circus_env(
+            &[
+                "--verbose",
+                "prepare",
+                "--task",
+                &task,
+                "--integration",
+                INTEGRATION,
+            ],
+            &env,
+        );
+        r.ok();
+        assert!(
+            !r.stderr.contains(esc),
+            "{name}: stderr was styled: {:?}",
+            r.stderr
+        );
+        assert!(!r.stdout.contains(esc), "{name}: stdout was styled");
+    }
+
+    let flagged = fx.circus(&[
+        "--no-color",
+        "prepare",
+        "--task",
+        "plain",
+        "--integration",
+        INTEGRATION,
+    ]);
+    flagged.ok();
+    assert!(
+        !flagged.stderr.contains(esc),
+        "--no-color: {:?}",
+        flagged.stderr
+    );
+}
+
 /// TEST-031 — NFR-001.b. Prohibited-action.
 #[test]
 fn test_031_never_deletes_attempt_state() {

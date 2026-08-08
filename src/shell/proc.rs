@@ -15,21 +15,42 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use super::ui::Ui;
 use super::{Error, Result};
 use crate::core::record::ExternalProgram;
 
 /// Runs external programs and remembers what it ran.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Invoker {
     log: Vec<ExternalProgram>,
     /// Programs whose absence has already been reported, so a missing tool is
     /// named once rather than once per call.
     missing: BTreeSet<String>,
+    /// Where `--verbose` invocation lines go — `#REQ-008.f`.
+    ui: Ui,
+}
+
+impl Default for Invoker {
+    fn default() -> Self {
+        Self {
+            log: Vec::new(),
+            missing: BTreeSet::new(),
+            ui: Ui::silent(),
+        }
+    }
 }
 
 impl Invoker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An invoker that narrates what it runs when `--verbose` is set.
+    pub fn with_ui(ui: Ui) -> Self {
+        Self {
+            ui,
+            ..Self::default()
+        }
     }
 
     /// Everything invoked so far, in call order.
@@ -67,6 +88,13 @@ impl Invoker {
         cwd: Option<&Path>,
     ) -> Result<Output> {
         let resolved = self.resolve(program)?;
+        if self.ui.is_verbose() {
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|a| a.as_ref().to_string_lossy().into_owned())
+                .collect();
+            self.ui.invocation(program, &rendered);
+        }
         let mut cmd = Command::new(&resolved);
         cmd.args(args.iter().map(AsRef::as_ref))
             .stdin(Stdio::null())

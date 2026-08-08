@@ -46,6 +46,11 @@ thing, writes the record back, and prints it.
 | `accept` | Records a decision from your verifier output and your evidence |
 | `merge` | Serialises one merge into the ref the attempt came from |
 
+Every command takes `-q`/`--quiet`, `-v`/`--verbose`, and `--no-color`.
+`circus merge` takes `-n`/`--dry-run`. stdout carries the run record as JSON and
+nothing else; progress, hints, and errors go to stderr. The CLI follows the
+[Command Line Interface Guidelines](https://clig.dev/).
+
 Three things Circus will not do, by design:
 
 - **An exit code never means accepted.** A driver that exits 0 has told you
@@ -105,7 +110,7 @@ Prerequisites: Rust 1.89 or later, Git, tmux, and
 [withdone](https://files.anuna.io/withdone/) on `PATH`.
 
 ```sh
-cargo test            # 129 tests: unit, spec suite, purity, traceability
+cargo test            # 153 tests: unit, spec suite, purity, traceability
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

@@ -28,7 +28,7 @@ A record that fails the schema exits 65 and causes no state transition.
 | `branch` | string | — | `circus/<task>/<attempt>` |
 | `pane_name` | string or null | `null` | Set at launch |
 | `log_path` | string or null | `null` | Outside every worktree |
-| `sentinel_path` | string or null | `null` | Outside every worktree |
+| `sentinel_path` | string or null | `null` | Set at prepare; outside every worktree |
 | `sentinel_value` | integer or null | `null` | The integer the worker wrote |
 | `transport_exit_code` | integer or null | `null` | withdone's exit code |
 | `completion_method` | enum | `none` | `sentinel` `child-exit` `none` |

@@ -9,6 +9,7 @@ pub mod git;
 pub mod pane;
 pub mod proc;
 pub mod state;
+pub mod ui;
 
 use std::fmt;
 
@@ -47,6 +48,21 @@ impl Error {
     }
     pub fn rejected(m: impl Into<String>) -> Self {
         Self::Rejected(m.into())
+    }
+
+    /// What to run next, where a generic answer exists.
+    ///
+    /// Most messages already carry their own guidance inline, because advice
+    /// specific to one failure belongs next to it. This covers the two cases
+    /// where the remedy is the same every time.
+    pub fn suggestion(&self) -> Option<String> {
+        match self {
+            Self::NotFound(p) => Some(format!("install `{p}`, then run the same command again")),
+            Self::DataErr(_) => {
+                Some("inspect the record, or prepare a new attempt with `circus prepare`".into())
+            }
+            _ => None,
+        }
     }
 
     /// The process exit code for this error.

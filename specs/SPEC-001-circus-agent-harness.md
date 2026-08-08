@@ -2,7 +2,7 @@
 id: SPEC-001
 title: Circus Agent Harness
 status: implemented
-version: 0.3.0
+version: 0.4.0
 last-updated: 2026-08-09
 implemented-date: 2026-08-09
 ---
@@ -53,7 +53,8 @@ Decisions: [[SPEC-001-circus-agent-harness#ADR-001]] external composition ·
 [[SPEC-001-circus-agent-harness#ADR-002]] evidence before merge ·
 [[SPEC-001-circus-agent-harness#ADR-003]] no automatic peer enrolment ·
 [[SPEC-001-circus-agent-harness#ADR-005]] merge coordination placement ·
-[[SPEC-001-circus-agent-harness#ADR-006]] attempt identity and state root.
+[[SPEC-001-circus-agent-harness#ADR-006]] attempt identity and state root ·
+[[SPEC-001-circus-agent-harness#ADR-008]] colour and terminal detection.
 
 Load-bearing: [[SPEC-001-circus-agent-harness#REQ-001]] isolation ·
 [[SPEC-001-circus-agent-harness#REQ-003]] explicit completion ·
@@ -70,6 +71,7 @@ Controls:
 - [[SPEC-001-circus-agent-harness#REQ-007]].b no scheduler, daemon, prompt injection, terminal emulator, or Elephant replacement.
 - [[SPEC-001-circus-agent-harness#NFR-001]].b Circus SHALL NOT delete an attempt worktree, branch, log, or record.
 - [[SPEC-001-circus-agent-harness#NFR-002]] cleanup deadline is 10 s; residue past it SHALL be recorded as a failed attempt.
+- [[SPEC-001-circus-agent-harness#REQ-009]].b a `--dry-run` merge SHALL move no ref, refresh no worktree, and write no record.
 
 Open:
 
@@ -333,6 +335,68 @@ It looks for a scheduler, a resident process, a prompt template, a pty
 implementation, and any local re-derivation of an Elephant query. No command
 decides this atom.
 
+### REQ-008: Operator Feedback
+
+- **REQ-008.a** — Circus SHALL write every human-facing message to stderr.
+- **REQ-008.b** — Circus SHALL write the run record to stdout, and nothing
+  else.
+- **REQ-008.c** — Before it begins waiting for an attempt, Circus SHALL report
+  the pane name and the command that attaches to it.
+- **REQ-008.d** — WHILE an attempt runs, Circus SHALL report the elapsed time
+  at least once every 60 s.
+- **REQ-008.e** — WITH `--quiet`, Circus SHALL suppress every message that is
+  not an error.
+- **REQ-008.f** — WITH `--verbose`, Circus SHALL additionally report each
+  external program it invokes.
+
+The split in [[SPEC-001-circus-agent-harness#REQ-008]].a and [[SPEC-001-circus-agent-harness#REQ-008]].b is what lets one stream stay a contract
+while the other stays human. A caller reading stdout gets
+[[SPEC-001-circus-agent-harness#CON-007]] and never has to filter progress out
+of it, which is why [[SPEC-001-circus-agent-harness#REQ-008]].b says "and nothing else" rather than "primarily".
+
+Defaults: both flags default to off. The dominant profile in
+[[users/lead-agent/happy-paths]] is one attempt watched while it runs, so
+progress is on and invocation detail is off. `--quiet` serves a caller that
+consumes only stdout; `--verbose` serves someone diagnosing a composition
+failure.
+
+[[SPEC-001-circus-agent-harness#REQ-008]].c is placed before the wait rather than after it on purpose. An
+operator who interrupts a launch needs the attach command at that moment. A
+message printed after the wait arrives too late to be of use.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-002]]
+- [[SPEC-001-circus-agent-harness#TEST-034]] (a, b — scope-invariant)
+- [[SPEC-001-circus-agent-harness#TEST-035]] (c — positive)
+- [[SPEC-001-circus-agent-harness#TEST-036]] (d — positive)
+- [[SPEC-001-circus-agent-harness#TEST-037]] (e — prohibited-action)
+- [[SPEC-001-circus-agent-harness#TEST-038]] (f — positive)
+- [[SPEC-001-circus-agent-harness#OBS-001]]
+
+### REQ-009: Merge Preview
+
+- **REQ-009.a** — WITH `--dry-run`, `circus merge` SHALL report whether the
+  merge conflicts.
+- **REQ-009.b** — WITH `--dry-run`, Circus SHALL NOT move a ref, refresh a
+  worktree, or write the run record.
+
+[[SPEC-001-circus-agent-harness#REQ-009]].b is the reason the preview is cheap rather than a second
+implementation of the merge. `git merge-tree` already computes the outcome in
+the object database without touching a ref or a file, so the preview is the
+same computation as the merge with the apply step omitted. There is no second
+code path to diverge.
+
+The exemption from [[SPEC-001-circus-agent-harness#NFR-003]].a is deliberate. A
+preview advances no attempt, so no state transition exists for a record to
+describe, and a record written anyway reports a change that never happened.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-004]]
+- [[SPEC-001-circus-agent-harness#TEST-039]] (a — positive)
+- [[SPEC-001-circus-agent-harness#TEST-040]] (b — prohibited-action, scope-invariant)
+
 ### NFR-001: Recoverable Attempts
 
 - **NFR-001.a** — Circus SHALL preserve the worktree, branch, transcript log,
@@ -427,6 +491,19 @@ NZDIGIT     = %x31-39
 
 Circus SHALL pass every caller-supplied ref and path to Git after a `--`
 terminator, so no caller value is interpreted as a Git option.
+
+Global options, accepted by every command and meaning the same thing in each:
+
+| Option | Default | Effect |
+|---|---|---|
+| `-q`, `--quiet` | off | Suppress every message that is not an error — [[SPEC-001-circus-agent-harness#REQ-008]].e |
+| `-v`, `--verbose` | off | Report each external program invoked — [[SPEC-001-circus-agent-harness#REQ-008]].f |
+| `--no-color` | off | Never style stderr — [[SPEC-001-circus-agent-harness#ADR-008]] |
+| `-h`, `--help` | — | Print help and exit 0 |
+| `-V`, `--version` | — | Print the version and exit 0 |
+
+`--quiet` and `--verbose` are mutually exclusive, and supplying both returns
+exit 64 rather than silently preferring one.
 
 ### CON-001: Worktree Preparation
 
@@ -545,6 +622,9 @@ Verified by:
 - [[SPEC-001-circus-agent-harness#TEST-019]]
 - [[SPEC-001-circus-agent-harness#TEST-027]]
 - [[SPEC-001-circus-agent-harness#TEST-030]]
+- [[SPEC-001-circus-agent-harness#TEST-034]]
+- [[SPEC-001-circus-agent-harness#TEST-035]]
+- [[SPEC-001-circus-agent-harness#TEST-036]]
 
 ### CON-003: Acceptance Record
 
@@ -619,7 +699,7 @@ Verified by:
 
 ### CON-004: Integration Merge
 
-Interface: `circus merge --attempt ATTEMPT --into REF`.
+Interface: `circus merge --attempt ATTEMPT --into REF [--dry-run]`.
 
 Input grammar:
 
@@ -627,6 +707,11 @@ Input grammar:
 ATTEMPT = attempt-id
 REF     = ref
 ```
+
+`--dry-run` reports the outcome and applies nothing —
+[[SPEC-001-circus-agent-harness#REQ-009]]. Every pre-condition below is still
+checked, so a preview reporting a clean merge is a statement about a merge
+Circus permits.
 
 Pre-conditions:
 
@@ -676,6 +761,8 @@ Verified by:
 - [[SPEC-001-circus-agent-harness#TEST-029]]
 - [[SPEC-001-circus-agent-harness#TEST-032]]
 - [[SPEC-001-circus-agent-harness#TEST-033]]
+- [[SPEC-001-circus-agent-harness#TEST-039]]
+- [[SPEC-001-circus-agent-harness#TEST-040]]
 
 ### CON-005: Elephant Isolation
 
@@ -1006,6 +1093,41 @@ this formula today, so the formula is checked only by
 `unverified` in the
 [[SPEC-001-circus-agent-harness#Gate Evidence Record]] with owner HOC, rather
 than presented as a satisfied obligation.
+
+### ADR-008: Colour and Terminal Detection
+
+The [[SPEC-001-circus-agent-harness#Contracts]] template requires behaviour to
+be invariant across calling context, and names reformatting output when stdout
+is a terminal as the example of what needs justifying. Circus styles its stderr
+messages when stderr is a terminal, so this ADR is that justification.
+
+The variance is confined to one stream. Stdout carries
+[[SPEC-001-circus-agent-harness#CON-007]] and is byte-identical whether it
+reaches a terminal, a pipe, or a file —
+[[SPEC-001-circus-agent-harness#REQ-008]].b. Nothing a caller parses ever
+changes shape. What varies is the styling of human messages on stderr, which no
+contract describes.
+
+Styling is applied only when every one of these holds:
+
+- stderr is a terminal.
+- `--no-color` was not supplied.
+- `NO_COLOR` is unset or empty.
+- `TERM` is not `dumb`.
+
+Three of those four are the conventions the ecosystem already agreed on, and
+following them is cheaper than inventing a fourth. The flag exists because an
+operator sometimes wants plain output from a terminal, which no environment
+variable expresses.
+
+The same detection governs the progress display of
+[[SPEC-001-circus-agent-harness#REQ-008]].d. A terminal receives one line
+rewritten in place; anything else receives a new line at each interval, because
+a carriage return in a log file produces an unreadable smear rather than an
+update.
+
+Ladder rung: 2 — `std::io::IsTerminal` and two environment variables. No
+terminal-handling dependency is introduced for four ANSI escapes.
 
 ## Verification Strategy
 
@@ -1402,6 +1524,68 @@ Given an accepted attempt that adds a file, and a clean worktree holding the
 integration ref, the lead merges. That worktree contains the added file
 afterwards. `git status` there reports no change.
 
+### TEST-034: Keep the Two Streams Apart
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-008]].a,
+[[SPEC-001-circus-agent-harness#REQ-008]].b — scope-invariant
+
+Every command is run with the two streams captured separately. Stdout parses
+as one run record and contains nothing else. Every progress line, hint, and
+error appears on stderr.
+
+### TEST-035: Report the Attach Command Before Waiting
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-008]].c — positive
+
+Given a driver that runs until the sentinel is written from outside, the lead
+launches it. The attach command naming the pane appears on stderr before the
+attempt completes.
+
+### TEST-036: Report Elapsed Time While an Attempt Runs
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-008]].d — positive
+
+Given a driver that runs for longer than one progress interval, the lead
+launches it. Stderr carries at least one line reporting elapsed time.
+
+### TEST-037: Silence Everything but Errors
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-008]].e — prohibited-action
+
+Given `--quiet`, a successful command writes nothing to stderr, and its run
+record still reaches stdout. A failing command still writes its error.
+
+### TEST-038: Report Invocations Under Verbose
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-008]].f — positive
+
+Given `--verbose`, a successful `prepare` names `git` on stderr. The same
+command without the flag does not.
+
+### TEST-039: Preview a Conflicting Merge
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-009]].a — positive
+
+Given an accepted attempt that conflicts, the lead runs `circus merge
+--dry-run`. Circus reports the conflict and names the conflicting path.
+
+### TEST-040: A Preview Changes Nothing
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-009]].b — prohibited-action,
+scope-invariant
+
+Given an accepted attempt that merges cleanly, the lead runs `circus merge
+--dry-run`. The integration ref is at its pre-command commit, the run record is
+byte-identical to before, and no worktree changed. A subsequent real merge then
+succeeds.
+
+### TEST-041: Style Only a Terminal
+
+Validates: [[SPEC-001-circus-agent-harness#ADR-008]] — negative
+
+With stderr captured to a pipe, no output contains an ANSI escape. The same
+holds with `NO_COLOR` set, with `TERM=dumb`, and with `--no-color`.
+
 ## Observability
 
 ### OBS-001: Attempt Lifecycle Record
@@ -1513,7 +1697,7 @@ gates:
   - gate: "Every TEST entry implemented and green"
     mechanism: "cargo test"
     result: pass
-    evidence: "2026-08-09 — 139 passed, 0 failed across 6 suites in 31s: 94 unit, 33 spec (TEST-001..033), 3 purity, 9 traceability"
+    evidence: "2026-08-09 — 153 passed, 0 failed across 6 suites in 31s: 100 unit, 41 spec (TEST-001..041), 3 purity, 9 traceability"
   - gate: "The built binary runs the happy path end to end"
     mechanism: "manual: cargo build --release, then prepare/launch/accept/merge in a scratch repository"
     result: pass
@@ -1559,9 +1743,9 @@ gates:
     result: pass
     evidence: "2026-08-09 — 42 mutants, 35 caught, 6 unviable, 1 missed. The survivor is LockGuard::drop, an equivalent mutant: closing the descriptor releases the lock regardless, and the reason it stays is recorded at the call site. A first run missed 5; the other four were killed by tests for `resolves` and `attempt_exists`, both of which were genuinely untested pre-conditions."
   - gate: "Mutation testing of the remaining shell modules"
-    mechanism: "cargo mutants --file 'src/shell/pane.rs' --file 'src/shell/proc.rs'"
+    mechanism: "cargo mutants --file 'src/shell/pane.rs' --file 'src/shell/proc.rs' --file 'src/shell/ui.rs'"
     result: unverified
-    evidence: "pane.rs and proc.rs are exercised only by the 33 integration tests, which take 30 s per run and make mutation prohibitively slow. Owner HOC."
+    evidence: "pane.rs, proc.rs, and ui.rs are exercised mainly by the 41 integration tests, which take 30 s per run and make mutation prohibitively slow. Owner HOC."
 ```
 
 ## Status
@@ -1586,7 +1770,18 @@ record a validated design.
 ## Changelog
 
 <details>
-<summary>Revision history — 0.1.0 → 0.3.0</summary>
+<summary>Revision history — 0.1.0 → 0.4.0</summary>
+
+- 0.4.0 — normative. Added [[SPEC-001-circus-agent-harness#REQ-008]] for
+  operator feedback and [[SPEC-001-circus-agent-harness#REQ-009]] for the merge
+  preview, after an audit of the command line against the Command Line
+  Interface Guidelines (https://clig.dev/). Added
+  [[SPEC-001-circus-agent-harness#ADR-008]], which is the justification the
+  contract template demands for styling stderr by terminal detection. Gave
+  every command `--quiet`, `--verbose`, and `--no-color`, and `circus merge` a
+  `--dry-run`. `prepare` now records and reports the sentinel path, because
+  an operator assembling that path by hand gets it wrong on any platform where
+  a temporary directory is a symlink. Added eight tests.
 
 - 0.3.0 — implementation. Status moved to `implemented`. Added
   [[SPEC-001-circus-agent-harness#REQ-005]].f and

@@ -27,6 +27,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use super::proc::{self, Invoker};
+use super::ui::{self, Ui};
 use super::{Error, Result};
 use crate::core::paths::AttemptPaths;
 use crate::core::record::CompletionMethod;
@@ -41,6 +42,19 @@ pub const CLEANUP_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How often to look for the pane's status file.
 const POLL: Duration = Duration::from_millis(100);
+
+/// When the first progress line appears. Early, because clig.dev's point about
+/// showing feedback quickly matters most when the operator cannot yet tell
+/// whether anything started.
+const FIRST_PROGRESS: Duration = Duration::from_secs(2);
+
+/// How often progress repeats on a terminal, where the line is rewritten in
+/// place and costs nothing.
+const PROGRESS_TTY: Duration = Duration::from_secs(1);
+
+/// How often progress repeats elsewhere, where each report is a new line in
+/// someone's log. `#REQ-008.d` requires at least once every 60 s.
+const PROGRESS_PLAIN: Duration = Duration::from_secs(30);
 
 /// What a completed launch produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +76,7 @@ pub fn launch(
     driver: &str,
     args: &[String],
     env: &[(String, String)],
+    ui: Ui,
 ) -> Result<LaunchOutcome> {
     // Resolve every external program up front, so an absent tool exits 127
     // before anything starts — `#CON-006`, `#TEST-013`.
@@ -180,7 +195,14 @@ pub fn launch(
     // before the pipe existed is lost.
     fs::write(&go, b"")?;
 
-    let transport_exit_code = wait_for_status(&paths.status, pane_id, inv)?;
+    // `#REQ-008.c` — before the wait, not after it. An operator who
+    // interrupts needs this command at that moment.
+    ui.state(&format!("{} is running", paths.pane_name));
+    ui.emphasis(&format!("watch it:  tmux attach -t {}", paths.pane_name));
+    ui.hint(&format!("transcript: {}", paths.log.display()));
+
+    let transport_exit_code = wait_for_status(&paths.status, pane_id, inv, ui)?;
+    ui.end_progress();
 
     // Cleanup is withdone's job; Circus measures whether it worked.
     //
@@ -224,7 +246,15 @@ fn write_script(path: &Path, body: &str) -> Result<()> {
 /// A pane that dies without writing a status crashed or was killed from
 /// outside. That is a transport outcome like any other, and it is reported as
 /// such rather than hanging.
-fn wait_for_status(status: &Path, pane_id: &str, inv: &mut Invoker) -> Result<i32> {
+fn wait_for_status(status: &Path, pane_id: &str, inv: &mut Invoker, ui: Ui) -> Result<i32> {
+    let started = Instant::now();
+    let mut next_report = started + FIRST_PROGRESS;
+    let every = if ui.is_terminal() {
+        PROGRESS_TTY
+    } else {
+        PROGRESS_PLAIN
+    };
+
     loop {
         if let Some(code) = read_status(status) {
             return Ok(code);
@@ -235,6 +265,14 @@ fn wait_for_status(status: &Path, pane_id: &str, inv: &mut Invoker) -> Result<i3
             return read_status(status).ok_or_else(|| {
                 Error::software("the tmux pane closed without recording an outcome")
             });
+        }
+        let now = Instant::now();
+        if now >= next_report {
+            ui.progress(&format!(
+                "running for {}",
+                ui::human_duration(now.duration_since(started))
+            ));
+            next_report = now + every;
         }
         sleep(POLL);
     }

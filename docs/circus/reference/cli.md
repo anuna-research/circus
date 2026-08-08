@@ -23,6 +23,36 @@ evidence-ref = 1*128( ALPHA / DIGIT / "-" / "_" / "." / ":" / "/" )
 A ref must not begin with `-`, must carry no control character, and must be
 accepted by `git check-ref-format --branch`.
 
+## Global options
+
+Accepted by every command, meaning the same thing in each.
+
+| Option | Default | Effect |
+|---|---|---|
+| `-q`, `--quiet` | off | Suppress every message that is not an error |
+| `-v`, `--verbose` | off | Report each external program invoked |
+| `--no-color` | off | Never style stderr, even on a terminal |
+| `-h`, `--help` | — | Print help and exit 0 |
+| `-V`, `--version` | — | Print the version and exit 0 |
+
+`--quiet` and `--verbose` are mutually exclusive. Supplying both exits 64.
+
+Stdout carries the run record and nothing else, whatever these are set to.
+`--quiet` silences stderr; it never withholds the record.
+
+## Streams and styling
+
+| Stream | Carries |
+|---|---|
+| stdout | The run record, as JSON. Nothing else, ever |
+| stderr | Progress, state changes, hints, and errors |
+
+Stderr is styled only when it is a terminal, `--no-color` was not given,
+`NO_COLOR` is unset or empty, and `TERM` is not `dumb`. Stdout is never styled.
+
+Progress on a terminal rewrites one line in place. Anywhere else it emits a new
+line at each interval, so a log file stays readable.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -133,17 +163,22 @@ Contract: CON-003. Signals: OBS-002.
 ## `circus merge`
 
 ```
-circus merge --attempt ATTEMPT --into REF
+circus merge --attempt ATTEMPT --into REF [--dry-run]
 ```
 
 | Argument | Type | Default | Constraint |
 |---|---|---|---|
 | `--attempt` | `attempt-id` | — | Must be recorded as accepted |
 | `--into` | `ref` | — | Must equal the recorded `integration_ref` |
+| `-n`, `--dry-run` | flag | off | Report the outcome and change nothing |
 
 Merges the task branch into the integration ref under the advisory lock. The
 merge is computed in the object database, and the ref moves by
 compare-and-swap.
+
+`--dry-run` runs every pre-condition and the same merge computation, then stops
+before applying. No ref moves, no worktree is refreshed, and no run record is
+written. A preview of a conflicting merge exits 1, so a script can branch on it.
 
 A worktree holding the ref is brought in line with the merge commit. A worktree
 holding the ref with an uncommitted change exits 64 before the ref moves.

@@ -16,12 +16,40 @@ use circus::core::decision::acceptance_decision;
 use circus::core::grammar::{AttemptId, AttemptN, EvidenceRef, Task};
 use circus::core::paths::{self, AttemptPaths, Roots};
 use circus::core::prompt::recognise_prompt;
-use circus::core::record::{self, Decision, Merge, RunRecord, State};
+use circus::core::record::{
+    self, CompletionMethod, Decision, Merge, MergeOutcome, RunRecord, State,
+};
 use circus::core::time::now_rfc3339;
 use circus::core::verifier;
 use circus::exit;
 use circus::shell::proc::Invoker;
+use circus::shell::ui::{Level, Ui};
 use circus::shell::{Error, Result, git, pane, state};
+
+const EXAMPLES: &str = "\
+Examples:
+  # Open a ring. Prints a run record naming the attempt and its sentinel path.
+  circus prepare --task model --integration main
+
+  # Run an agent in it. The prompt must contain the sentinel path literally.
+  circus launch --attempt model/1 --prompt prompt.md -- my-agent-cli
+
+  # Record your own verdict. Circus never forms one.
+  circus accept --attempt model/1 --verifier-record v.json --evidence theory:q42
+
+  # See whether it would conflict, then merge.
+  circus merge --attempt model/1 --into main --dry-run
+  circus merge --attempt model/1 --into main
+
+Output:
+  stdout carries the run record as JSON, and nothing else.
+  stderr carries progress, hints, and errors.
+
+Exit codes:
+  0 success · 1 rejected or conflicted · 64 bad input · 65 bad record
+  70 an external program failed · 127 a required program is missing
+
+Docs: docs/circus/index.md · Specification: specs/SPEC-001-circus-agent-harness.md";
 
 #[derive(Parser)]
 #[command(
@@ -30,11 +58,25 @@ use circus::shell::{Error, Result, git, pane, state};
     about = "Run coding-agent CLIs in isolated Git worktrees",
     long_about = "Circus opens a ring for each act, records the result, and never \
                   decides whether the act was good.\n\n\
-                  Specified by SPEC-001-circus-agent-harness."
+                  Specified by SPEC-001-circus-agent-harness.",
+    after_help = EXAMPLES,
+    after_long_help = EXAMPLES
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Suppress every message that is not an error.
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
+
+    /// Report each external program Circus invokes.
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
+    /// Never style stderr, even when it is a terminal.
+    #[arg(long, global = true)]
+    no_color: bool,
 }
 
 #[derive(Subcommand)]
@@ -86,6 +128,9 @@ enum Command {
         attempt: String,
         #[arg(long)]
         into: String,
+        /// Report whether the merge conflicts, and change nothing.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
     },
 }
 
@@ -95,7 +140,18 @@ fn main() -> ExitCode {
     // recognition, and an argument that is missing or malformed is exactly
     // that, so the code is remapped rather than left to differ by which layer
     // noticed.
-    let cli = match Cli::try_parse() {
+    // `--no-color` has to be honoured by clap's own error and help rendering
+    // too, and clap decides that before it has parsed anything. A pre-scan of
+    // argv is the only place the flag can reach it — `ADR-008`.
+    let mut command = <Cli as clap::CommandFactory>::command();
+    if std::env::args_os().any(|a| a == "--no-color") {
+        command = command.color(clap::ColorChoice::Never);
+    }
+
+    let cli = match command
+        .try_get_matches_from_mut(std::env::args_os())
+        .and_then(|m| <Cli as clap::FromArgMatches>::from_arg_matches(&m))
+    {
         Ok(cli) => cli,
         Err(e) => {
             let help = matches!(
@@ -108,31 +164,45 @@ fn main() -> ExitCode {
             return ExitCode::from(if help { exit::OK } else { exit::USAGE } as u8);
         }
     };
-    let mut inv = Invoker::new();
+    let level = match (cli.quiet, cli.verbose) {
+        (true, _) => Level::Quiet,
+        (_, true) => Level::Verbose,
+        _ => Level::Normal,
+    };
+    let ui = Ui::new(level, cli.no_color);
+    let mut inv = Invoker::with_ui(ui);
 
     let outcome = match cli.command {
         Command::Prepare {
             task,
             integration,
             attempt,
-        } => prepare(&mut inv, &task, &integration, attempt.as_deref()),
+        } => prepare(&mut inv, ui, &task, &integration, attempt.as_deref()),
         Command::Launch {
             attempt,
             prompt,
             driver,
-        } => launch(&mut inv, &attempt, &prompt, &driver),
+        } => launch(&mut inv, ui, &attempt, &prompt, &driver),
         Command::Accept {
             attempt,
             verifier_record,
             evidence,
-        } => accept(&mut inv, &attempt, &verifier_record, &evidence),
-        Command::Merge { attempt, into } => merge(&mut inv, &attempt, &into),
+        } => accept(&mut inv, ui, &attempt, &verifier_record, &evidence),
+        Command::Merge {
+            attempt,
+            into,
+            dry_run,
+        } => merge(&mut inv, ui, &attempt, &into, dry_run),
     };
 
     match outcome {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
-            eprintln!("circus: {e}");
+            ui.end_progress();
+            ui.error(&e.to_string());
+            if let Some(next) = e.suggestion() {
+                ui.hint(&next);
+            }
             ExitCode::from(e.code() as u8)
         }
     }
@@ -160,7 +230,13 @@ fn finish(inv: &mut Invoker, path: &Path, mut rec: RunRecord, code: i32) -> Resu
 
 // ── CON-001 ────────────────────────────────────────────────────────────────
 
-fn prepare(inv: &mut Invoker, task: &str, integration: &str, attempt: Option<&str>) -> Result<i32> {
+fn prepare(
+    inv: &mut Invoker,
+    ui: Ui,
+    task: &str,
+    integration: &str,
+    attempt: Option<&str>,
+) -> Result<i32> {
     let task = Task::recognise(task)?;
     let requested = attempt.map(AttemptN::recognise).transpose()?;
     let cwd = cwd()?;
@@ -211,19 +287,39 @@ fn prepare(inv: &mut Invoker, task: &str, integration: &str, attempt: Option<&st
         return Err(e);
     }
 
-    let rec = RunRecord::prepared(
+    let mut rec = RunRecord::prepared(
         &id,
         &paths,
         roots.repository.clone(),
         integration,
         now_rfc3339(),
     );
+    // The sentinel path is derived, not discovered, so it is known now. An
+    // operator building a prompt needs it before the launch, and copying it
+    // from the record is the only way to get the exact bytes REQ-003.c wants.
+    rec.sentinel_path = Some(paths.sentinel.to_string_lossy().into_owned());
+
+    ui.state(&format!("prepared {id}"));
+    ui.hint(&format!("worktree:  {}", paths.worktree.display()));
+    ui.hint(&format!("branch:    {}", paths.branch));
+    ui.emphasis("the prompt must contain this path, exactly:");
+    ui.emphasis(&format!("  {}", paths.sentinel.display()));
+    ui.hint(&format!(
+        "next: circus launch --attempt {id} --prompt <file> -- <driver>"
+    ));
+
     finish(inv, &paths.record, rec, exit::OK)
 }
 
 // ── CON-002 ────────────────────────────────────────────────────────────────
 
-fn launch(inv: &mut Invoker, attempt: &str, prompt: &Path, driver: &[String]) -> Result<i32> {
+fn launch(
+    inv: &mut Invoker,
+    ui: Ui,
+    attempt: &str,
+    prompt: &Path,
+    driver: &[String],
+) -> Result<i32> {
     let (_roots, id, paths) = locate(inv, attempt)?;
     let mut rec = state::read_record(&paths.record)?;
 
@@ -272,7 +368,7 @@ fn launch(inv: &mut Invoker, attempt: &str, prompt: &Path, driver: &[String]) ->
     rec.sentinel_path = Some(paths.sentinel.to_string_lossy().into_owned());
     rec.timestamps.launched_at = Some(now_rfc3339());
 
-    let outcome = match pane::launch(inv, &paths, driver_name, args, &env) {
+    let outcome = match pane::launch(inv, &paths, driver_name, args, &env, ui) {
         Ok(o) => o,
         Err(e) => {
             // The attempt stays `prepared` so a fixed environment can relaunch
@@ -302,6 +398,29 @@ fn launch(inv: &mut Invoker, attempt: &str, prompt: &Path, driver: &[String]) ->
     } else {
         exit::OK
     };
+
+    match rec.completion_method {
+        CompletionMethod::Sentinel => ui.state(&format!(
+            "{id} finished: the worker wrote {} to its sentinel",
+            outcome.sentinel_value.unwrap_or_default()
+        )),
+        _ => ui.state(&format!(
+            "{id} finished: the driver exited {} without writing a sentinel",
+            outcome.transport_exit_code
+        )),
+    }
+    if rec.state == State::Failed {
+        ui.state(&format!(
+            "{id} failed: {} process(es) outlived the cleanup deadline",
+            outcome.process_group_residue
+        ));
+    } else {
+        ui.hint("this says the agent stopped, not that its work is good");
+        ui.hint(&format!(
+            "next: run your verifier, then circus accept --attempt {id} \
+--verifier-record <file> --evidence <ref>"
+        ));
+    }
     finish(inv, &paths.record, rec, code)
 }
 
@@ -309,6 +428,7 @@ fn launch(inv: &mut Invoker, attempt: &str, prompt: &Path, driver: &[String]) ->
 
 fn accept(
     inv: &mut Invoker,
+    ui: Ui,
     attempt: &str,
     verifier_record: &Path,
     evidence: &[String],
@@ -348,15 +468,32 @@ fn accept(
     rec.timestamps.decided_at = Some(now_rfc3339());
 
     let code = match decision {
-        Decision::Accepted => exit::OK,
-        Decision::Rejected => exit::REJECTED,
+        Decision::Accepted => {
+            ui.state(&format!("accepted {id}"));
+            ui.hint(&format!(
+                "next: circus merge --attempt {id} --into {}",
+                rec.integration_ref
+            ));
+            exit::OK
+        }
+        Decision::Rejected => {
+            ui.state(&format!(
+                "rejected {id}: the verifier exited {}",
+                rec.verifier.as_ref().map_or(-1, |v| v.exit_code)
+            ));
+            ui.hint(&format!(
+                "the attempt is preserved at {}",
+                paths.worktree.display()
+            ));
+            exit::REJECTED
+        }
     };
     finish(inv, &paths.record, rec, code)
 }
 
 // ── CON-004 ────────────────────────────────────────────────────────────────
 
-fn merge(inv: &mut Invoker, attempt: &str, into: &str) -> Result<i32> {
+fn merge(inv: &mut Invoker, ui: Ui, attempt: &str, into: &str, dry_run: bool) -> Result<i32> {
     let (roots, id, paths) = locate(inv, attempt)?;
     let mut rec = state::read_record(&paths.record)?;
 
@@ -378,23 +515,61 @@ fn merge(inv: &mut Invoker, attempt: &str, into: &str) -> Result<i32> {
 
     let cwd = cwd()?;
     let _lock = state::lock(&roots)?;
-    let report = git::merge_into(inv, &cwd, &into, &rec.branch)?;
 
-    let conflicted = report.outcome == circus::core::record::MergeOutcome::Conflict;
+    // One computation for both paths — `#REQ-009`. The preview is the merge
+    // with the apply step omitted, so the two can never disagree.
+    let plan = git::plan_merge(inv, &cwd, &into, &rec.branch)?;
+    let conflicted = plan.outcome == MergeOutcome::Conflict;
+
+    if dry_run {
+        // `#REQ-009.b` — no ref moves, no worktree is refreshed, and no record
+        // is written. The attempt is exactly as it was.
+        if conflicted {
+            ui.state(&format!(
+                "{id} would conflict with `{into}` in {}",
+                plan.conflicts.join(", ")
+            ));
+            ui.hint("see docs/circus/how-to/how-to-resolve-a-merge-conflict.md");
+        } else {
+            ui.state(&format!("{id} merges cleanly into `{into}`"));
+            ui.hint(&format!("next: circus merge --attempt {id} --into {into}"));
+        }
+        ui.hint("this was a dry run; nothing changed");
+        return Ok(if conflicted { exit::REJECTED } else { exit::OK });
+    }
+
+    let report = git::apply_merge(inv, &cwd, &into, &rec.branch, &plan)?;
+
     if !conflicted {
         rec.state = State::Merged;
         rec.timestamps.merged_at = Some(now_rfc3339());
     }
     rec.merge = Some(Merge {
         result: report.outcome,
-        commit: report.commit,
+        commit: report.commit.clone(),
     });
 
     if conflicted {
-        eprintln!(
-            "circus: merge conflicted in {}; `{into}` is unchanged",
+        ui.state(&format!(
+            "{id} conflicted with `{into}` in {}",
             report.conflicts.join(", ")
-        );
+        ));
+        ui.hint(&format!(
+            "`{into}` is unchanged and the attempt is untouched"
+        ));
+        ui.hint("see docs/circus/how-to/how-to-resolve-a-merge-conflict.md");
+    } else {
+        // A short hash is what a person quotes back; the full one is in the
+        // record for anything that needs it.
+        let short = report
+            .commit
+            .as_deref()
+            .map_or("(unknown)", |c| c.get(..12).unwrap_or(c));
+        ui.state(&format!("merged {id} into `{into}` as {short}"));
+        ui.hint(&format!(
+            "the attempt is preserved; remove it with `git worktree remove {}`",
+            paths.worktree.display()
+        ));
     }
     let code = if conflicted { exit::REJECTED } else { exit::OK };
     finish(inv, &paths.record, rec, code)
