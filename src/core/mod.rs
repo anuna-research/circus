@@ -7,6 +7,8 @@
 
 pub mod decision;
 pub mod grammar;
+pub mod instruction;
+pub mod marker;
 pub mod paths;
 pub mod prompt;
 pub mod record;

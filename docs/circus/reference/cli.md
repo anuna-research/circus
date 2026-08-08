@@ -160,6 +160,29 @@ work, done before acceptance.
 
 Contract: CON-003. Signals: OBS-002.
 
+## `circus instruction`
+
+```
+circus instruction --attempt ATTEMPT
+```
+
+| Argument | Type | Default | Constraint |
+|---|---|---|---|
+| `--attempt` | `attempt-id` | — | A run record must exist |
+
+Writes the attempt's completion instruction to stdout, containing its sentinel
+path verbatim. Creates and modifies nothing.
+
+```sh
+{ cat task.md; circus instruction --attempt model/1; } > prompt.md
+```
+
+Circus prints the instruction; it never inserts it into a prompt. Assembling
+the sentinel path by hand is the one reliable way to get a launch refused — on
+macOS `/tmp` is a symlink, and a typed path does not match the canonical one.
+
+Contract: CON-008.
+
 ## `circus merge`
 
 ```

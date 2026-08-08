@@ -2,7 +2,7 @@
 id: SPEC-001
 title: Circus Agent Harness
 status: implemented
-version: 0.4.0
+version: 0.5.0
 last-updated: 2026-08-09
 implemented-date: 2026-08-09
 ---
@@ -338,8 +338,9 @@ decides this atom.
 ### REQ-008: Operator Feedback
 
 - **REQ-008.a** — Circus SHALL write every human-facing message to stderr.
-- **REQ-008.b** — Circus SHALL write the run record to stdout, and nothing
-  else.
+- **REQ-008.b** — Circus SHALL write only a command's primary output to
+  stdout. That output is the run record for every attempt command, and the
+  instruction text for [[SPEC-001-circus-agent-harness#REQ-010]].
 - **REQ-008.c** — Before it begins waiting for an attempt, Circus SHALL report
   the pane name and the command that attaches to it.
 - **REQ-008.d** — WHILE an attempt runs, Circus SHALL report the elapsed time
@@ -349,10 +350,12 @@ decides this atom.
 - **REQ-008.f** — WITH `--verbose`, Circus SHALL additionally report each
   external program it invokes.
 
-The split in [[SPEC-001-circus-agent-harness#REQ-008]].a and [[SPEC-001-circus-agent-harness#REQ-008]].b is what lets one stream stay a contract
-while the other stays human. A caller reading stdout gets
-[[SPEC-001-circus-agent-harness#CON-007]] and never has to filter progress out
-of it, which is why [[SPEC-001-circus-agent-harness#REQ-008]].b says "and nothing else" rather than "primarily".
+The split in [[SPEC-001-circus-agent-harness#REQ-008]].a and
+[[SPEC-001-circus-agent-harness#REQ-008]].b is what lets one stream stay a
+contract while the other stays human. A caller reading stdout gets exactly one
+thing and never has to filter progress out of it, which is why
+[[SPEC-001-circus-agent-harness#REQ-008]].b says "only" rather than
+"primarily".
 
 Defaults: both flags default to off. The dominant profile in
 [[users/lead-agent/happy-paths]] is one attempt watched while it runs, so
@@ -396,6 +399,40 @@ Trace:
 - [[SPEC-001-circus-agent-harness#CON-004]]
 - [[SPEC-001-circus-agent-harness#TEST-039]] (a — positive)
 - [[SPEC-001-circus-agent-harness#TEST-040]] (b — prohibited-action, scope-invariant)
+
+### REQ-010: Completion Instruction
+
+- **REQ-010.a** — `circus instruction` SHALL write an attempt's completion
+  instruction to stdout.
+- **REQ-010.b** — The instruction SHALL contain the attempt's sentinel path as
+  a literal substring.
+- **REQ-010.c** — Circus SHALL NOT write the instruction into a prompt file.
+
+The wording of that instruction is the one piece of knowledge every driver
+needs and none of them owns. It is not provider-specific: an agent that can run
+a shell command can follow it, whichever CLI is hosting the agent. Leaving it
+undocumented means every operator rediscovers it, and the clause that matters
+most — that the sentinel is written when the work is *done*, not when the agent
+plans to finish — is the one most often left out.
+
+[[SPEC-001-circus-agent-harness#REQ-010]].c is what keeps
+[[SPEC-001-circus-agent-harness#REQ-003]].d intact. Circus prints the
+instruction; the operator decides whether to use it. Composition does the rest:
+
+```sh
+{ cat task.md; circus instruction --attempt model/1; } > prompt.md
+```
+
+Source: the canonical wording is adapted from the withdone recipes, which is
+where the mechanism was first written down. Two copies of one sentence can
+drift, and recording the origin is the cheapest guard against that.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-008]]
+- [[SPEC-001-circus-agent-harness#TEST-042]] (a, b — positive)
+- [[SPEC-001-circus-agent-harness#TEST-043]] (c — prohibited-action)
+- [[SPEC-001-circus-agent-harness#TEST-044]] (a — scope-invariant)
 
 ### NFR-001: Recoverable Attempts
 
@@ -944,6 +981,45 @@ Verified by:
 - [[SPEC-001-circus-agent-harness#TEST-014]]
 - [[SPEC-001-circus-agent-harness#TEST-028]]
 
+### CON-008: Completion Instruction
+
+Interface: `circus instruction --attempt ATTEMPT`.
+
+Input grammar:
+
+```abnf
+ATTEMPT = attempt-id
+```
+
+Pre-conditions:
+
+- `ATTEMPT` is recognised in full.
+- A run record exists for `ATTEMPT` and is recognised against
+  [[SPEC-001-circus-agent-harness#CON-007]].
+
+Post-conditions:
+
+- Circus writes the completion instruction to stdout.
+- The instruction contains the attempt's `sentinel_path` verbatim.
+- A prompt whose content is the instruction satisfies
+  [[SPEC-001-circus-agent-harness#REQ-003]].c.
+- Circus creates and modifies nothing.
+
+Error model:
+
+- An unrecognised `ATTEMPT` returns exit 64.
+- A missing record returns exit 64, naming the attempt.
+
+Implements:
+
+- [[SPEC-001-circus-agent-harness#REQ-010]]
+
+Verified by:
+
+- [[SPEC-001-circus-agent-harness#TEST-042]]
+- [[SPEC-001-circus-agent-harness#TEST-043]]
+- [[SPEC-001-circus-agent-harness#TEST-044]]
+
 ## Architecture Decisions
 
 ### ADR-001: Compose Existing Unix Programs
@@ -1001,19 +1077,91 @@ Exploration brief:
   on completion.
 - Owner: HOC.
 
-What the first implementation settled, pending the spike's own exit criteria:
+Resolved 2026-08-09. The spike ran, and the contract it settled is:
 
-- Working directory: the pane starts in the attempt worktree.
-- Prompt: a byte-identical copy is placed at `<attempt-dir>/prompt`, and its
-  path is handed to the driver as `CIRCUS_PROMPT`. The sentinel path is handed
-  over as `CIRCUS_SENTINEL`, and the attempt handle as `CIRCUS_ATTEMPT`.
-- Argv: the caller's `-- DRIVER [ARGS...]` tail crosses through tmux's own
-  argument vector into `"$@"`, so no driver argument is ever concatenated into
-  shell text.
+| | |
+|---|---|
+| Working directory | The attempt worktree |
+| stdin, stdout, stderr | A terminal — the tmux pane, on all three |
+| `CIRCUS_PROMPT` | Absolute path to a byte-identical copy of the caller's prompt |
+| `CIRCUS_SENTINEL` | The path the agent writes to signal completion |
+| `CIRCUS_ATTEMPT` | The `task/attempt` handle |
+| `CIRCUS_WORKTREE` | The worktree, same as the working directory |
+| argv | The caller's `-- DRIVER [ARGS...]` tail, minus the driver name |
 
-No provider branch exists in the code, which is the property the spike was
-opened to protect. The exit criteria are not yet met: two unrelated agent CLIs
-have not been run through it, only shell fixtures. The decision stays open.
+Exit criteria, against the brief above:
+
+- Two unrelated agent CLIs ran to sentinel completion through one argv shape.
+  `codex exec` (codex-cli 0.146.1) and `opencode run` (opencode 1.14.48) each
+  repaired a deliberately broken test in an attempt worktree and signalled `0`.
+- No provider branch exists in Circus. Provider knowledge lives in `drivers/`,
+  which is not installed and which the binary does not discover. Deleting the
+  directory changes nothing about how Circus treats a caller-supplied driver.
+
+Two findings the spike produced, neither of which the brief predicted:
+
+- **A driver receives a terminal on all three descriptors,** and tmux can type
+  into the pane the driver names through `$TMUX_PANE`. Keystroke injection
+  therefore needs no `expect`.
+- **A full-screen agent is nonetheless unusable today, and not for that
+  reason.** withdone enables job control and backgrounds the child, so the
+  agent lands in a process group that is not the terminal's foreground group.
+  An agent that reads the terminal as it starts receives SIGTTIN and stops,
+  permanently and silently: `ps` shows state `T`, the pane stays blank, and the
+  transcript is empty. Non-interactive agents never read the terminal, so none
+  of the three working drivers is affected. The correction this forces is worth
+  recording: `expect` in the withdone recipe allocates a *second* pty in which
+  the agent is the foreground process, and that — not PTY allocation as such —
+  is what keeps SIGTTIN from firing. The fix belongs upstream in withdone.
+- **The completion discriminator was wrong, and the spike is what showed it.**
+  See [[SPEC-001-circus-agent-harness#OBS-003]] and
+  [[SPEC-001-circus-agent-harness#ADR-009]].
+
+A third input arrived from the same source: the prompt wording every recipe
+hand-writes is provider-neutral and belongs in one place, which is
+[[SPEC-001-circus-agent-harness#REQ-010]].
+
+Also unresolved: a full-screen agent, for the SIGTTIN reason above, and
+Claude's per-directory trust prompt behind it, which
+`--dangerously-skip-permissions` does not cover and which fires on every fresh
+worktree. `drivers/circus-driver-claude-tui` is kept as an experiment carrying
+the diagnosis, not as a working driver.
+
+Not resolved: whether Circus SHOULD ever *discover* drivers by name, the way
+Git finds a subcommand. The spike gives no evidence for it — `PATH` already
+does the lookup — so the question stays closed until something reopens it.
+
+### ADR-009: How a Signalled Completion Is Told From a Natural One
+
+The first implementation inferred it from an absence. A wrapper script wrote a
+marker after the child returned. withdone kills the group as soon as it sees a
+sentinel write, so on that path the wrapper never reached its final line. A
+missing marker therefore meant the sentinel won.
+
+The [[SPEC-001-circus-agent-harness#ADR-004]] spike falsified that. A
+non-interactive agent writes the sentinel as the last act of its turn and then
+exits immediately, so the child is gone before withdone notices the write. The
+marker gets written. `codex exec` repaired the code, ran
+`echo 0 > <sentinel>`, and was recorded as `child-exit` with no sentinel value
+— a properly signalled attempt reported as one that gave up.
+
+The mechanism cannot be fixed by racing better. withdone unlinks the sentinel
+on both paths, and Circus polls from outside the pane, so any watcher Circus
+runs is slower than the wrapper that is already there.
+
+Decision: the wrapper reads the sentinel itself, at the one instant nothing can
+have removed it yet — immediately after the child returns. It records what it
+saw, and Circus reads three cases from that rather than two:
+
+| Marker | Meaning |
+|---|---|
+| absent | withdone killed the group, so the sentinel won |
+| `wrote=yes` | the agent signalled and then ended its turn; both happened |
+| `wrote=no` | the child gave up without signalling |
+
+The middle row is the common case for every non-interactive agent, which is
+why getting it wrong mattered. The marker is a declared format recognised in
+full before any field is used, like every other input.
 
 ### ADR-005: Merge Coordination Stays in Circus
 
@@ -1586,6 +1734,30 @@ Validates: [[SPEC-001-circus-agent-harness#ADR-008]] — negative
 With stderr captured to a pipe, no output contains an ANSI escape. The same
 holds with `NO_COLOR` set, with `TERM=dumb`, and with `--no-color`.
 
+### TEST-042: Print an Instruction a Prompt Can Use
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-010]].a,
+[[SPEC-001-circus-agent-harness#REQ-010]].b — positive
+
+Given a prepared attempt, the lead runs `circus instruction`. Stdout contains
+the attempt's sentinel path verbatim. A prompt file built from that output
+launches without the recogniser refusing it.
+
+### TEST-043: Print Without Writing
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-010]].c — prohibited-action
+
+Given a prepared attempt, the lead runs `circus instruction`. The attempt
+directory holds exactly the files it held before, byte for byte, and no prompt
+file exists.
+
+### TEST-044: Keep the Instruction Off the Record Stream
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-010]].a — scope-invariant
+
+Stdout from `circus instruction` does not parse as a run record, and carries no
+message. The attempt's own record is unchanged.
+
 ## Observability
 
 ### OBS-001: Attempt Lifecycle Record
@@ -1628,7 +1800,7 @@ Phase 2:
 - [ ] A fresh-context reviewer has checked the Orientation block.
 - [ ] A cross-model reviewer has reviewed the specification (Tier 2).
 - [ ] A synthetic-user simulation covers [[users/lead-agent/happy-paths]].
-- [ ] The driver contract spike has resolved
+- [x] The driver contract spike has resolved
       [[SPEC-001-circus-agent-harness#ADR-004]].
 - [ ] The steward has ratified or rejected
       [[SPEC-001-circus-agent-harness#ADR-005]].
@@ -1687,8 +1859,8 @@ gates:
     evidence: "ADR-005 status proposed; owner HOC"
   - gate: "Driver contract spike resolves ADR-004"
     mechanism: "spike report against the ADR-004 exit criteria"
-    result: unverified
-    evidence: "argv and prompt delivery settled and recorded in ADR-004; the exit criteria are unmet — only shell fixtures have run, not two agent CLIs; owner HOC"
+    result: pass
+    evidence: "2026-08-09 — codex-cli 0.146.1 and opencode 1.14.48 each repaired a deliberately broken test in an attempt worktree and signalled 0 through one argv shape, with no provider branch in Circus. Recorded in ADR-004. The spike also falsified the completion discriminator; see ADR-009."
 ```
 
 ```yaml
@@ -1697,7 +1869,11 @@ gates:
   - gate: "Every TEST entry implemented and green"
     mechanism: "cargo test"
     result: pass
-    evidence: "2026-08-09 — 153 passed, 0 failed across 6 suites in 31s: 100 unit, 41 spec (TEST-001..041), 3 purity, 9 traceability"
+    evidence: "2026-08-09 — 173 passed, 0 failed across 6 suites in 31s: 117 unit, 44 spec (TEST-001..044), 3 purity, 9 traceability"
+  - gate: "A full-screen agent runs under a driver"
+    mechanism: "manual: circus launch -- circus-driver-claude-tui against Claude Code 2.1.226"
+    result: fail
+    evidence: "2026-08-09 — the agent is SIGTTIN-stopped by withdone's job control before it renders anything. Diagnosis and the upstream fix are in ADR-004 and drivers/README.md. No requirement obliges Circus to host a TUI, so this fails an experiment rather than a gate; owner HOC."
   - gate: "The built binary runs the happy path end to end"
     mechanism: "manual: cargo build --release, then prepare/launch/accept/merge in a scratch repository"
     result: pass
@@ -1770,7 +1946,18 @@ record a validated design.
 ## Changelog
 
 <details>
-<summary>Revision history — 0.1.0 → 0.4.0</summary>
+<summary>Revision history — 0.1.0 → 0.5.0</summary>
+
+- 0.5.0 — normative. Added [[SPEC-001-circus-agent-harness#REQ-010]] and
+  [[SPEC-001-circus-agent-harness#CON-008]] for `circus instruction`, so the
+  one piece of prompt wording every driver needs lives in one place instead of
+  being rediscovered. Resolved
+  [[SPEC-001-circus-agent-harness#ADR-004]] against codex and opencode. Added
+  [[SPEC-001-circus-agent-harness#ADR-009]] after the spike falsified the
+  completion discriminator: a non-interactive agent signals and then exits, so
+  the child-exit marker won the race and a signalled attempt was recorded as
+  `child-exit` with no sentinel value. The wrapper now reads the sentinel at
+  the instant the child returns. Added three tests and four example drivers.
 
 - 0.4.0 — normative. Added [[SPEC-001-circus-agent-harness#REQ-008]] for
   operator feedback and [[SPEC-001-circus-agent-harness#REQ-009]] for the merge

@@ -1,0 +1,7 @@
+#!/bin/sh
+# circus-driver-claude — Claude Code, one-shot via --print.
+#
+# Bills against an Anthropic API account. For subscription billing use
+# circus-driver-claude-tui instead.
+set -eu
+exec claude --print --dangerously-skip-permissions "$@" "$(cat "$CIRCUS_PROMPT")"

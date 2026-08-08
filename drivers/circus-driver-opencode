@@ -1,0 +1,6 @@
+#!/bin/sh
+# circus-driver-opencode — opencode, non-interactive.
+#
+# Extra arguments after the driver name are forwarded to opencode.
+set -eu
+exec opencode run --dangerously-skip-permissions "$@" "$(cat "$CIRCUS_PROMPT")"

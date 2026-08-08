@@ -15,14 +15,13 @@ cargo install --path .
 circus prepare --task model --integration main
 # → prints a run record naming the attempt, its worktree, and its sentinel path
 
-# 2. Write a prompt containing that literal sentinel path.
-cat > prompt.md <<'EOF'
-Add the model layer described in the issue. Run the tests.
-Assert your evidence to Elephant. Only then: echo 0 > /repo/.git/circus/model/1/sentinel
-EOF
+# 2. Build a prompt. Circus supplies the completion instruction; you supply
+#    the task. Never assemble the sentinel path by hand.
+echo "Add the model layer described in the issue. Run the tests." > task.md
+{ cat task.md; circus instruction --attempt model/1; } > prompt.md
 
 # 3. Run the agent in a named, attachable pane.
-circus launch --attempt model/1 --prompt prompt.md -- my-agent-cli
+circus launch --attempt model/1 --prompt prompt.md -- circus-driver-codex
 
 # 4. Verify it yourself, then record the decision.
 cargo test > /tmp/v.txt; echo "{\"command\":[\"cargo\",\"test\"],\"exit_code\":$?,\"output_path\":\"/tmp/v.txt\"}" > v.json
@@ -45,6 +44,7 @@ thing, writes the record back, and prints it.
 | `launch` | One named tmux pane, running your driver through withdone |
 | `accept` | Records a decision from your verifier output and your evidence |
 | `merge` | Serialises one merge into the ref the attempt came from |
+| `instruction` | Prints the completion instruction a prompt needs |
 
 Every command takes `-q`/`--quiet`, `-v`/`--verbose`, and `--no-color`.
 `circus merge` takes `-n`/`--dry-run`. stdout carries the run record as JSON and
@@ -61,6 +61,21 @@ Three things Circus will not do, by design:
   independently already holds its own identity.
 - **It never deletes an attempt.** A failed or rejected attempt keeps its
   worktree, branch, transcript, and record until you remove them.
+
+## Drivers
+
+A driver is any executable that runs one agent CLI. Circus has already opened
+the worktree, minted the sentinel, allocated the terminal, and wrapped the
+process in withdone, so a driver is usually one line:
+
+```sh
+#!/bin/sh
+exec codex exec --dangerously-bypass-approvals-and-sandbox "$(cat "$CIRCUS_PROMPT")"
+```
+
+Four examples live in [`drivers/`](drivers/README.md). They are not installed
+and the binary does not know they exist — `-- circus-driver-codex` is an
+ordinary `PATH` lookup, which is the plugin system Unix already provides.
 
 Full guides: [docs/circus/](docs/circus/index.md).
 
@@ -110,7 +125,7 @@ Prerequisites: Rust 1.89 or later, Git, tmux, and
 [withdone](https://files.anuna.io/withdone/) on `PATH`.
 
 ```sh
-cargo test            # 153 tests: unit, spec suite, purity, traceability
+cargo test            # 173 tests: unit, spec suite, purity, traceability
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

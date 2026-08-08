@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 
 use circus::core::decision::acceptance_decision;
 use circus::core::grammar::{AttemptId, AttemptN, EvidenceRef, Task};
+use circus::core::instruction::instruction_text;
 use circus::core::paths::{self, AttemptPaths, Roots};
 use circus::core::prompt::recognise_prompt;
 use circus::core::record::{
@@ -31,8 +32,11 @@ Examples:
   # Open a ring. Prints a run record naming the attempt and its sentinel path.
   circus prepare --task model --integration main
 
-  # Run an agent in it. The prompt must contain the sentinel path literally.
-  circus launch --attempt model/1 --prompt prompt.md -- my-agent-cli
+  # Build a prompt whose completion instruction Circus itself supplies.
+  { cat task.md; circus instruction --attempt model/1; } > prompt.md
+
+  # Run an agent in it.
+  circus launch --attempt model/1 --prompt prompt.md -- circus-driver-codex
 
   # Record your own verdict. Circus never forms one.
   circus accept --attempt model/1 --verifier-record v.json --evidence theory:q42
@@ -122,6 +126,13 @@ enum Command {
         evidence: Vec<String>,
     },
 
+    /// Print the completion instruction a prompt for this attempt needs.
+    Instruction {
+        /// The `task/attempt` handle printed by `prepare`.
+        #[arg(long)]
+        attempt: String,
+    },
+
     /// Merge an accepted attempt into its recorded integration ref.
     Merge {
         #[arg(long)]
@@ -188,6 +199,7 @@ fn main() -> ExitCode {
             verifier_record,
             evidence,
         } => accept(&mut inv, ui, &attempt, &verifier_record, &evidence),
+        Command::Instruction { attempt } => instruction(&mut inv, ui, &attempt),
         Command::Merge {
             attempt,
             into,
@@ -489,6 +501,29 @@ fn accept(
         }
     };
     finish(inv, &paths.record, rec, code)
+}
+
+// ── CON-008 ────────────────────────────────────────────────────────────────
+
+fn instruction(inv: &mut Invoker, ui: Ui, attempt: &str) -> Result<i32> {
+    let (_roots, id, paths) = locate(inv, attempt)?;
+    // Reading the record is what makes this a statement about a real attempt
+    // rather than a path this command derived for itself.
+    let rec = state::read_record(&paths.record)?;
+    let sentinel = rec
+        .sentinel_path
+        .as_deref()
+        .ok_or_else(|| Error::usage(format!("attempt `{id}` has no sentinel path recorded")))?;
+
+    // stdout, because it is this command's primary output — `#REQ-008.b`.
+    print!("{}", instruction_text(Path::new(sentinel)));
+
+    ui.state(&format!("completion instruction for {id}"));
+    ui.hint("append it to your task description:");
+    ui.hint(&format!(
+        "  {{ cat task.md; circus instruction --attempt {id}; }} > prompt.md"
+    ));
+    Ok(exit::OK)
 }
 
 // ── CON-004 ────────────────────────────────────────────────────────────────

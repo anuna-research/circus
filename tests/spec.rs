@@ -1,4 +1,4 @@
-//! The `SPEC-001-circus-agent-harness` test suite: TEST-001 through TEST-033.
+//! The `SPEC-001-circus-agent-harness` test suite: TEST-001 through TEST-044.
 //!
 //! One test per specification entry, named for it, attributing the requirement
 //! atoms it validates. The requirement-attribution map π is total in both
@@ -1548,6 +1548,109 @@ fn test_041_styles_only_a_terminal() {
         "--no-color: {:?}",
         flagged.stderr
     );
+}
+
+// ── REQ-010: the completion instruction ────────────────────────────────────
+
+/// TEST-042 — REQ-010.a, REQ-010.b. Positive.
+#[test]
+fn test_042_prints_an_instruction_a_prompt_can_use() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+
+    let r = fx.circus(&["instruction", "--attempt", &id]);
+    r.ok();
+
+    let sentinel = fx.sentinel_of(&id).to_string_lossy().into_owned();
+    assert!(
+        r.stdout.contains(&sentinel),
+        "the sentinel path must appear verbatim: {}",
+        r.stdout
+    );
+
+    // The property that makes this useful: what Circus prints is what its own
+    // recogniser accepts, composed the documented way.
+    let prompt = fx.raw_file("composed.md", &format!("Fix the bug.\n{}", r.stdout));
+    let drv = fx.script(
+        "quick",
+        &format!("echo 0 > {}; sleep 30\n", fx.sentinel_of(&id).display()),
+    );
+    fx.circus(&[
+        "launch",
+        "--attempt",
+        &id,
+        "--prompt",
+        prompt.to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ])
+    .ok();
+    assert_eq!(fx.record(&id)["completion_method"], "sentinel");
+}
+
+/// TEST-043 — REQ-010.c. Prohibited-action.
+#[test]
+fn test_043_prints_without_writing() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+
+    let dir = fx.attempt_dir(&id);
+    let before: Vec<(String, Vec<u8>)> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    fx.circus(&["instruction", "--attempt", &id]).ok();
+
+    let after: Vec<(String, Vec<u8>)> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(before, after, "the attempt directory changed");
+    assert!(!dir.join("prompt").exists(), "a prompt file was written");
+    assert!(!fx.sentinel_of(&id).exists(), "the sentinel was created");
+}
+
+/// TEST-044 — REQ-010.a. Scope-invariant.
+#[test]
+fn test_044_keeps_the_instruction_off_the_record_stream() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+    let record_before = fs::read(fx.attempt_dir(&id).join("record.json")).unwrap();
+
+    let r = fx.circus(&["instruction", "--attempt", &id]);
+    r.ok();
+
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&r.stdout).is_err(),
+        "stdout should be instruction text, not a record"
+    );
+    assert!(
+        !r.stdout.contains("circus:"),
+        "no message leaked into stdout"
+    );
+    assert_eq!(
+        fs::read(fx.attempt_dir(&id).join("record.json")).unwrap(),
+        record_before,
+        "the record was rewritten"
+    );
+
+    // And an unknown attempt is a usage error, not a panic.
+    let bad = fx.circus(&["instruction", "--attempt", "nosuch/1"]);
+    assert_eq!(bad.code, 64, "stderr: {}", bad.stderr);
+    assert_eq!(bad.stdout, "");
 }
 
 /// TEST-031 — NFR-001.b. Prohibited-action.

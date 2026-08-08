@@ -1,0 +1,15 @@
+#!/bin/sh
+# circus-driver-codex — OpenAI Codex CLI, non-interactive.
+#
+# Circus has already opened the worktree, minted the sentinel, allocated the
+# PTY, and wrapped this process in withdone. All that is left is handing the
+# prompt to one agent CLI in the shape it expects.
+#
+# Auth: `codex login` (ChatGPT/Codex subscription).
+# Extra arguments after the driver name are forwarded to codex.
+set -eu
+exec codex exec \
+    --dangerously-bypass-approvals-and-sandbox \
+    --skip-git-repo-check \
+    "$@" \
+    "$(cat "$CIRCUS_PROMPT")"

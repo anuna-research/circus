@@ -1,0 +1,59 @@
+#!/bin/sh
+# circus-driver-claude-tui — Claude Code TUI, subscription billing.
+#
+# EXPERIMENTAL. This driver does not currently work, and the reason is not in
+# this script. It is kept because the diagnosis is worth having written down.
+#
+# What works: tmux can type into the pane the driver names through $TMUX_PANE,
+# so `expect` is not needed for keystroke injection. `paste-buffer -p` performs
+# a real bracketed paste, read straight from the prompt file.
+#
+# What blocks it: withdone enables job control (`set -m`) and backgrounds the
+# child, which puts the agent in a process group that is not the terminal's
+# foreground group. A full-screen agent reads the terminal on startup, receives
+# SIGTTIN, and is stopped — permanently, and silently. `ps` shows it as state
+# `T` with no output ever reaching the pane.
+#
+# Non-interactive agents (codex exec, opencode run, claude --print) never read
+# the terminal, so none of them is affected. This is specific to TUIs.
+#
+# This also explains why the withdone recipe for the same job uses `expect`:
+# expect allocates a *second* pty and the agent is the foreground process of
+# that one, so SIGTTIN never fires. PTY allocation was never the whole reason.
+#
+# The fix belongs upstream in withdone — hand the terminal to the child's
+# process group, or do not enable job control. Until then, use
+# circus-driver-claude (API billing) for a non-interactive Claude.
+#
+# A second obstacle sits behind the first: Claude asks whether it trusts the
+# directory, once per directory, and --dangerously-skip-permissions does not
+# cover that prompt. Every Circus attempt is a fresh worktree, so it fires
+# every time. The Enter below answers it, but that is untested past the stop.
+#
+set -eu
+
+settle="${CIRCUS_TUI_SETTLE:-4}"
+buffer="circus-${CIRCUS_ATTEMPT:-prompt}"
+
+if [ -z "${TMUX_PANE:-}" ]; then
+    echo "circus-driver-claude-tui: no \$TMUX_PANE; run me through circus launch" >&2
+    exit 64
+fi
+
+(
+    # Claude asks whether it can trust the directory, once per directory, and
+    # --dangerously-skip-permissions does not cover that one. Every Circus
+    # attempt is a brand-new worktree, so this fires every time. "Yes, I trust
+    # this folder" is preselected, so one Enter clears it; on an already
+    # trusted directory the same Enter is a harmless empty submit.
+    sleep "$settle"
+    tmux send-keys -t "$TMUX_PANE" Enter
+    sleep "$settle"
+
+    tmux load-buffer -b "$buffer" "$CIRCUS_PROMPT"
+    tmux paste-buffer -p -d -b "$buffer" -t "$TMUX_PANE"
+    sleep 1
+    tmux send-keys -t "$TMUX_PANE" Enter
+) &
+
+exec claude --dangerously-skip-permissions "$@"
