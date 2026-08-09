@@ -54,7 +54,8 @@ Decisions: [[SPEC-001-circus-agent-harness#ADR-001]] external composition ·
 [[SPEC-001-circus-agent-harness#ADR-003]] no automatic peer enrolment ·
 [[SPEC-001-circus-agent-harness#ADR-005]] merge coordination placement ·
 [[SPEC-001-circus-agent-harness#ADR-006]] attempt identity and state root ·
-[[SPEC-001-circus-agent-harness#ADR-008]] colour and terminal detection.
+[[SPEC-001-circus-agent-harness#ADR-008]] colour and terminal detection ·
+[[SPEC-001-circus-agent-harness#ADR-010]] which process group is measured.
 
 Load-bearing: [[SPEC-001-circus-agent-harness#REQ-001]] isolation ·
 [[SPEC-001-circus-agent-harness#REQ-003]] explicit completion ·
@@ -1679,6 +1680,38 @@ update.
 Ladder rung: 2 — `std::io::IsTerminal` and two environment variables. No
 terminal-handling dependency is introduced for four ANSI escapes.
 
+### ADR-010: Which Process Group Is Measured
+
+[[SPEC-001-circus-agent-harness#NFR-002]] fails an attempt whose process group is not empty at the deadline,
+and the first implementation measured the group of the tmux pane. That is the
+wrong group, and the error hid on one platform.
+
+A pane's process group legitimately holds Circus's own scaffolding: the runner
+script, and withdone itself. Both are `sh`, both are meant to be there, and both
+exit on their own schedule after the status file appears. Counting them
+conflates the harness with the workload it is measuring.
+
+On macOS they happened to exit within the deadline and the conflation was
+invisible. On Linux one of them outlived it, so `state` became `failed`,
+`launch` exited 1, and every launch-based test failed in CI while passing on the
+developer's machine. Three rounds of diagnosis went into finding it: first the
+count was wrong (`ps -g`, [[SPEC-001-circus-agent-harness#ADR-009]]'s sibling problem), then the count was
+right but nameless, and only once the survivor was printed — `sh (pid 1925)` —
+was it clear that the thing being counted was Circus's own plumbing.
+
+Decision: measure the group the *agent* runs in. withdone enables job control,
+so the child it wraps gets a process group of its own, and that group holds the
+agent and its descendants and nothing of Circus's. The wrapper records it to
+`<attempt-dir>/pgid` before the agent starts, because the wrapper is the only
+participant that is inside that group and can name it.
+
+No recorded group means the wrapper never ran, or `ps` is absent. Either way the
+group is unmeasurable and is reported clean, which is the convention everywhere
+else Circus cannot observe something.
+
+The control is unchanged in force: [[SPEC-001-circus-agent-harness#TEST-030]] still fails an attempt whose
+agent leaves a process behind. What changed is that it now watches the agent.
+
 ## Verification Strategy
 
 Tier: 2. Circus owns core contracts, a trust boundary that reads
@@ -2307,7 +2340,8 @@ evidence reference and the acceptance decision.
 ### OBS-003: Process Cleanup Result
 
 The run record's `completion_method` and `process_group_residue` fields record
-how the attempt ended and whether the process group was empty. These two fields
+how the attempt ended and whether the process group was empty. The group is the
+agent's, not the pane's — [[SPEC-001-circus-agent-harness#ADR-010]]. These two fields
 are the signals [[SPEC-001-circus-agent-harness#NFR-002]] is stated over.
 
 ### OBS-004: External Program Invocation Record
