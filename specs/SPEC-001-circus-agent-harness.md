@@ -2344,6 +2344,20 @@ how the attempt ended and whether the process group was empty. The group is the
 agent's, not the pane's — [[SPEC-001-circus-agent-harness#ADR-010]]. These two fields
 are the signals [[SPEC-001-circus-agent-harness#NFR-002]] is stated over.
 
+`process_group_residue` counts the **live** members of that group. A zombie is
+not counted. It has released its memory, its descriptors and its terminal, and
+what remains is a row in the process table holding an exit status until some
+parent calls `wait`. [[SPEC-001-circus-agent-harness#NFR-002]] is a claim about
+processes that outlive the deadline, and a process that has already exited
+outlives nothing.
+
+The distinction is not academic. Under CI every launched attempt was failed for
+a survivor that had already been killed: a container's PID 1 is the job's own
+shell rather than an init, so it never reaps the orphans that reparent to it and
+the entry persists for the whole job, where an ordinary system clears it in
+microseconds. Circus therefore selects on the state column rather than trusting
+the row's presence — see [[SPEC-001-circus-agent-harness#ADR-010]].
+
 ### OBS-004: External Program Invocation Record
 
 The run record's `external_programs` array records every external program
