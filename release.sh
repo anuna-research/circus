@@ -9,7 +9,7 @@ set -e
 # Example: ./release.sh 0.1.0
 #
 # Bumps the version, runs the gate, commits, tags, and pushes. Pushing the tag
-# triggers .woodpecker/release.yaml, which cross-compiles the four prebuilt
+# triggers .forgejo/workflows/release.yaml, which cross-compiles the four prebuilt
 # binaries and publishes them (plus scripts/install.sh and the example drivers)
 # to Cloudflare R2, served at https://files.anuna.io/circus/.
 #
@@ -109,7 +109,7 @@ cargo metadata --locked --format-version 1 >/dev/null \
 
 # The release pipeline reads these. A tag that publishes a broken artifact set
 # is worse than one that never gets cut.
-for required in scripts/install.sh .woodpecker/release.yaml; do
+for required in scripts/install.sh .forgejo/workflows/release.yaml; do
   [[ -f "$required" ]] || error "$required is missing; the release pipeline needs it."
 done
 [[ -n "$(echo drivers/circus-driver-*)" ]] || warn "No drivers found to publish."
@@ -141,7 +141,7 @@ git push origin "$TAG"
 echo ""
 info "Release $TAG published!"
 echo ""
-echo "Woodpecker release pipeline triggered (.woodpecker/release.yaml)."
+echo "Forgejo Actions release pipeline triggered (.forgejo/workflows/release.yaml)."
 echo "When it finishes, the release will be available at:"
 echo "  https://files.anuna.io/circus/            (latest)"
 echo "  https://files.anuna.io/circus/$TAG/"

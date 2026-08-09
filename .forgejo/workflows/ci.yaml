@@ -1,0 +1,180 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Anuna Research
+#
+# circus CI gate (Forgejo Actions), on every push to main and every pull
+# request. The same checks ./release.sh gates on locally: the full suite,
+# rustfmt, and clippy.
+#
+# What makes this pipeline unusual is the composition boundary. circus invokes
+# Git, tmux, and withdone as external programs and never substitutes an
+# internal implementation (SPEC-001-circus-agent-harness#REQ-007), and its
+# 55-entry spec suite drives all three for real rather than mocking them —
+# Constitutional Principle 5. So the runner needs all three installed, and the
+# job checks for them before running anything: a missing tool should say so
+# once, up front, instead of fifteen tests exiting 127 apiece.
+#
+# Runner notes, taken from ../selfsame and ../hark rather than assumed: the
+# Forgejo runner image ships node, git, and curl, but NOT rustup, NOT a C
+# toolchain, and NOT necessarily `sudo`. Every step that needs one installs it
+# and guards the privilege escalation.
+#
+# circus has no path dependencies, so unlike the sibling pipelines there are no
+# sibling checkouts to clone and no revisions to pin — `--locked` fixes the
+# whole tree on its own.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # A short socket directory. A Unix domain socket path caps near 104 bytes and
+  # tmux builds its socket path from this, so a deep default fails in a way
+  # that reads as a tmux bug rather than a path-length one. It cost an hour
+  # during development; it costs one line here.
+  TMUX_TMPDIR: /tmp/tmux-ci
+  # CI never runs a debugger, and debug info for the test binaries is the bulk
+  # of the target tree. Incremental caching is pure disk waste on a one-shot
+  # build. Local builds are unaffected: this is the CI environment, not
+  # Cargo.toml.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install the C toolchain and the programs circus composes
+        run: |
+          set -euo pipefail
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "This job needs apt-get to install tmux, which circus invokes." >&2
+            exit 1
+          fi
+          SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+          $SUDO apt-get update
+          # build-essential: rustc needs a linker even with no C dependencies.
+          # tmux: the pane a launched agent runs in.
+          # procps: `ps`, which the process-group residue of OBS-003 is counted with.
+          # python3: one lock test probes flock through it, and skips without it.
+          $SUDO apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl tmux procps python3
+
+      - name: Install withdone
+        # The explicit completion channel. Not on any package index — it is an
+        # Anuna binary, installed the same way an operator installs it.
+        run: |
+          set -euo pipefail
+          curl -fsSL https://files.anuna.io/withdone/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Ensure the Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain stable --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show active-toolchain || rustup toolchain install stable --profile minimal
+          rustup component add rustfmt clippy
+          rustc --version
+          cargo --version
+
+      - name: Confirm the composition boundary is satisfied
+        # Fail here, legibly and once, rather than fifteen times as exit 127
+        # inside the suite. REQ-007.a says circus invokes these rather than
+        # reimplementing them; this is that requirement checked on the runner.
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          missing=""
+          for p in git tmux withdone ps; do
+            command -v "$p" >/dev/null 2>&1 || missing="$missing $p"
+          done
+          if [ -n "$missing" ]; then
+            echo "circus composes these and they are not installed:$missing" >&2
+            exit 1
+          fi
+          git --version && tmux -V && withdone --version
+
+      - name: Configure Git for the fixtures
+        # The suite drives Git for real, and Git refuses to commit without an
+        # identity. Each fixture repository sets its own; this covers anything
+        # that reaches a global.
+        run: |
+          git config --global user.email ci@anuna.io
+          git config --global user.name "circus CI"
+          git config --global init.defaultBranch main
+
+      # Registry only, deliberately not `target`. hark's pipeline cached both
+      # and it filled the runner disk; the failure is not a clean "cache full"
+      # either, but a half-restored target that blames the wrong crate. circus's
+      # tree is far smaller, but a cold compile of three dependencies costs
+      # seconds and is not worth the class of failure.
+      - name: Cache the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-circus-ci-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-circus-ci-v1-
+
+      - name: Test
+        # ~15 of the 55 spec tests start a tmux pane; each isolates its server
+        # through TMUX_TMPDIR, so they do not collide.
+        run: |
+          set -o pipefail
+          mkdir -p "$TMUX_TMPDIR"
+          cargo test --locked 2>&1 | tee -a /tmp/circus-ci.log
+
+      - name: Formatting
+        run: |
+          set -o pipefail
+          cargo fmt --check 2>&1 | tee -a /tmp/circus-ci.log
+
+      - name: Clippy (deny warnings)
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets --locked -- -D warnings 2>&1 | tee -a /tmp/circus-ci.log
+
+      - name: Boundary gates
+        # `cargo test` above already ran both. Naming them makes the two
+        # structural gates visible in the log rather than buried in a count:
+        # tests/purity.rs enforces the Purity Boundary Map's dependency rule,
+        # and tests/traceability.rs decides the requirement-attribution map.
+        run: |
+          set -o pipefail
+          cargo test --locked --test purity --test traceability 2>&1 | tee -a /tmp/circus-ci.log
+
+      # This Forgejo exposes no log endpoint, so a failure is visible only as
+      # "Failing after Nm", which is not enough to fix anything. Commit statuses
+      # ARE readable through the API, so the first error line goes into one.
+      # Borrowed from ../selfsame; delete it the day the instance grows a log
+      # endpoint.
+      - name: Report the first error into a commit status
+        if: failure()
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          line=$(grep -m1 -E '^(error|warning: unused|thread .* panicked|circus: )' /tmp/circus-ci.log 2>/dev/null \
+                 || tail -n 3 /tmp/circus-ci.log 2>/dev/null \
+                 || echo "no output captured — failed before the first cargo step")
+          line=$(printf '%s' "$line" | tr '\n' ' ' | cut -c1-240)
+          echo "reporting: ${line}"
+          curl -sS -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$(printf '{"context":"ci-diagnostic","state":"failure","description":%s}' \
+                  "$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")" \
+            >/dev/null || true

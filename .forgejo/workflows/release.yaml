@@ -1,0 +1,205 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Anuna Research
+#
+# circus release pipeline (Forgejo Actions).
+#
+# Triggered by pushing a tag like `v0.1.0` (see ./release.sh). Cross-compiles
+# the four prebuilt binaries that scripts/install.sh downloads
+#   circus-darwin-arm64  circus-darwin-x64  circus-linux-x64  circus-linux-arm64
+# each with a matching .sha256, then publishes them (plus install.sh and the
+# example drivers) to Cloudflare R2 (bucket anuna-files) so they are served at
+#   https://files.anuna.io/circus/            <- flat "latest", what install.sh reads
+#   https://files.anuna.io/circus/<tag>/      <- immutable per-release archive
+#
+# One job, so every step shares the workspace: `dist/` accumulates across the
+# build steps and the osxcross toolchain is built once and reused by both darwin
+# targets. Everything runs on a Linux `ubuntu-latest` runner, including the
+# darwin artifacts (via osxcross + the macOS SDK) — the Forgejo runners are
+# Linux-only.
+#
+# Simpler than the sibling pipelines in two ways. circus has no path
+# dependencies, so there is nothing to clone and no revision to pin: `--locked`
+# fixes the whole tree. And its three dependencies (clap, serde, serde_json) are
+# pure Rust with no C in them, so no cross build needs a target C toolchain for
+# a dependency — only the linker for the final artifact.
+#
+# What is NOT run here is the test suite. circus drives real Git, tmux, and
+# withdone, and three of these four targets cannot execute on this runner at
+# all. The gate for that is .forgejo/workflows/ci.yaml on the way to the tag,
+# and ./release.sh refuses to tag until it passes locally.
+#
+# circus does carry a custom [profile.release] (lto = true, codegen-units = 1).
+# Over three pure-Rust crates that costs seconds and needs none of the thin-LTO
+# softening the heavier Anuna pipelines apply to survive a cross-link. If a
+# cross-link ever OOMs, prefix that step's cargo build with
+# CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16.
+#
+# Required Forgejo Actions secrets. These are org-level on anuna-research and
+# inherited, the same Cloudflare R2 credentials the hark pipeline uses:
+#   CF_R2_ACCESS_KEY_ID  CF_R2_SECRET_ACCESS_KEY  CF_ACCOUNT_ID
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure the Rust toolchain
+        # The Forgejo runner image ships node, git, and curl but NOT rustup, and
+        # may lack a C toolchain. rustc needs a linker even with no C
+        # dependencies.
+        run: |
+          set -euo pipefail
+          SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+          if ! command -v cc >/dev/null 2>&1; then
+            $SUDO apt-get update && $SUDO apt-get install -y build-essential pkg-config curl
+          fi
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain stable --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show active-toolchain || rustup toolchain install stable --profile minimal
+          rustc --version
+          cargo --version
+
+      - name: Cache the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-circus-release-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-circus-release-v1-
+
+      - name: Build linux-x64
+        run: |
+          rustup target add x86_64-unknown-linux-gnu
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/circus dist/circus-linux-x64
+          cd dist && sha256sum circus-linux-x64 > circus-linux-x64.sha256
+
+      - name: Build linux-arm64
+        # No C in the dependency tree, so the cross toolchain is needed only to
+        # link the final artifact.
+        run: |
+          SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+          $SUDO apt-get update && $SUDO apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          cargo build --release --locked --target aarch64-unknown-linux-gnu
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-gnu/release/circus dist/circus-linux-arm64
+          cd dist && sha256sum circus-linux-arm64 > circus-linux-arm64.sha256
+
+      - name: Install the osxcross toolchain (macOS SDK)
+        # Built once; both darwin targets below reuse /tmp/osxcross.
+        run: |
+          SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+          $SUDO apt-get update && $SUDO apt-get install -y clang cmake patch xz-utils libxml2-dev
+          if [ ! -d /tmp/osxcross ]; then
+            git clone https://github.com/tpoechtrager/osxcross /tmp/osxcross
+            curl -fsSL https://github.com/joseluisq/macosx-sdks/releases/download/14.5/MacOSX14.5.sdk.tar.xz \
+              -o /tmp/osxcross/tarballs/MacOSX14.5.sdk.tar.xz
+            ( cd /tmp/osxcross && UNATTENDED=1 ./build.sh )
+          fi
+
+      - name: Build darwin-arm64
+        run: |
+          export PATH="/tmp/osxcross/target/bin:$PATH"
+          export CC_aarch64_apple_darwin=aarch64-apple-darwin23.5-clang
+          export CXX_aarch64_apple_darwin=aarch64-apple-darwin23.5-clang++
+          export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=aarch64-apple-darwin23.5-clang
+          rustup target add aarch64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/circus dist/circus-darwin-arm64
+          cd dist && sha256sum circus-darwin-arm64 > circus-darwin-arm64.sha256
+
+      - name: Build darwin-x64
+        run: |
+          export PATH="/tmp/osxcross/target/bin:$PATH"
+          export CC_x86_64_apple_darwin=x86_64-apple-darwin23.5-clang
+          export CXX_x86_64_apple_darwin=x86_64-apple-darwin23.5-clang++
+          export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=x86_64-apple-darwin23.5-clang
+          rustup target add x86_64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist
+          cp target/x86_64-apple-darwin/release/circus dist/circus-darwin-x64
+          cd dist && sha256sum circus-darwin-x64 > circus-darwin-x64.sha256
+
+      - name: Create release metadata
+        run: |
+          # The installer the curl one-liner fetches, shipped alongside the binaries.
+          cp scripts/install.sh dist/install.sh
+          # The example drivers. install.sh does NOT install them: a driver is a
+          # choice, and SPEC-001-circus-agent-harness#REQ-007.b keeps provider
+          # knowledge out of circus itself. Publishing them makes the known-good
+          # ones fetchable without cloning.
+          mkdir -p dist/drivers
+          cp drivers/circus-driver-* dist/drivers/
+          cp drivers/README.md dist/drivers/README.md
+          cat > dist/version.json << EOF
+          {
+            "version": "${GITHUB_REF_NAME#v}",
+            "download_url": "https://files.anuna.io/circus/${GITHUB_REF_NAME}"
+          }
+          EOF
+          ls -la dist/ dist/drivers/
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          if ! command -v aws >/dev/null 2>&1; then
+            SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+            $SUDO apt-get update && $SUDO apt-get install -y awscli
+          fi
+
+          export AWS_DEFAULT_REGION=auto
+          export R2_ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          export BUCKET="anuna-files"
+          export PROJECT="circus"
+
+          # Flat prefix = the "latest" the curl installer reads
+          # (https://files.anuna.io/circus/circus-<os>-<arch> and .../install.sh),
+          # plus an immutable per-tag archive at circus/<tag>/.
+          for file in dist/circus-* dist/install.sh dist/version.json; do
+            [ -f "$file" ] || continue
+            name=$(basename "$file")
+            aws s3 cp "$file" "s3://${BUCKET}/${PROJECT}/${name}"                    --endpoint-url "$R2_ENDPOINT"
+            aws s3 cp "$file" "s3://${BUCKET}/${PROJECT}/${GITHUB_REF_NAME}/${name}" --endpoint-url "$R2_ENDPOINT"
+            echo "Uploaded: $name"
+          done
+
+          for file in dist/drivers/*; do
+            [ -f "$file" ] || continue
+            name=$(basename "$file")
+            aws s3 cp "$file" "s3://${BUCKET}/${PROJECT}/drivers/${name}"                    --endpoint-url "$R2_ENDPOINT"
+            aws s3 cp "$file" "s3://${BUCKET}/${PROJECT}/${GITHUB_REF_NAME}/drivers/${name}" --endpoint-url "$R2_ENDPOINT"
+            echo "Uploaded: drivers/$name"
+          done
+
+          # Informational only, and non-fatal: an "Object Read & Write" R2 token
+          # can PutObject (the uploads above) but may lack bucket ListBucket.
+          echo "Files in ${PROJECT}/ (latest):"
+          aws s3 ls "s3://${BUCKET}/${PROJECT}/" --endpoint-url "$R2_ENDPOINT" || echo "(list not permitted by this token; the uploads above succeeded)"
+          echo ""
+          echo "Release available at:"
+          echo "  https://files.anuna.io/${PROJECT}/"
+          echo "  https://files.anuna.io/${PROJECT}/${GITHUB_REF_NAME}/"
+          echo "Install: curl https://files.anuna.io/${PROJECT}/install.sh | sh"
+          echo "Drivers: https://files.anuna.io/${PROJECT}/drivers/"

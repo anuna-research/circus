@@ -72,7 +72,7 @@ uninstall:
 
 # Build the release binary and stage it as a distributable artifact for the
 # host platform: dist/circus-<os>-<arch> plus its .sha256 checksum. The release
-# pipeline (.woodpecker/release.yaml) produces all four platforms and uploads
+# pipeline (.forgejo/workflows/release.yaml) produces all four platforms and uploads
 # them to https://files.anuna.io/circus/; use this only to stage a single
 # platform by hand (see scripts/install.sh).
 dist: build ## Stage dist/circus-<os>-<arch> + .sha256 for the host platform

@@ -171,11 +171,11 @@ make dist         # stage dist/circus-<os>-<arch> + .sha256 for this platform
 ```
 
 Bumps the version, runs the whole gate, commits, tags, and pushes. The tag
-triggers `.woodpecker/release.yaml`, which cross-compiles four binaries and
+triggers `.forgejo/workflows/release.yaml`, which cross-compiles four binaries and
 publishes them with `scripts/install.sh` and the example drivers to
 <https://files.anuna.io/circus/>.
 
 The gate runs here rather than in the release pipeline for a reason: the suite
 drives real Git, tmux, and withdone, and the pipeline cross-compiles from Linux
-containers to four targets, none of which can run a tmux pane. `.woodpecker/ci.yaml`
+containers to four targets, none of which can run a tmux pane. `.forgejo/workflows/ci.yaml`
 runs it on every push; `release.sh` refuses to tag without it passing locally.

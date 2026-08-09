@@ -23,7 +23,7 @@
 # composing them — but it does check and say what is missing.
 #
 # Publishing (operator):
-#   Tagging a release with ./release.sh triggers .woodpecker/release.yaml,
+#   Tagging a release with ./release.sh triggers .forgejo/workflows/release.yaml,
 #   which cross-compiles the four binaries and uploads them (plus this script
 #   as install.sh) to https://files.anuna.io/circus/. To stage a
 #   single-platform artifact by hand, run `make dist`.
