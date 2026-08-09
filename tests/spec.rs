@@ -229,10 +229,19 @@ fn test_003_starts_a_named_tmux_pane() {
     // something else it was.
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let said = stderr
+    // Join every circus line: when cleanup is the problem, the survivor names
+    // are on a different line from the failure itself.
+    let said: String = stderr
         .lines()
-        .rfind(|l| l.contains("circus:"))
-        .unwrap_or("(circus said nothing)");
+        .filter(|l| l.contains("circus:") || l.contains("process group"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ¶ ");
+    let said = if said.is_empty() {
+        "(circus said nothing)".to_string()
+    } else {
+        said
+    };
     let rec = fx.record(&id);
     assert!(
         out.status.success(),

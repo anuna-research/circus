@@ -187,13 +187,38 @@ fn is_executable(p: &Path) -> bool {
 /// costs a few lines of output and removes a platform divergence from a
 /// control: `#NFR-002.c` fails an attempt on a non-zero count.
 pub fn process_group_residue(inv: &mut Invoker, pgid: i32) -> u32 {
-    let Ok(out) = inv.run("ps", &["-A", "-o", "pid=,pgid="]) else {
+    survivors(inv, pgid).len() as u32
+}
+
+/// Which processes remain in a process group, as `pid command` pairs.
+///
+/// A count answers whether cleanup worked; only the names answer why it did
+/// not. "1 process outlived the deadline" sent me guessing twice; "sleep 60
+/// (pid 123) outlived the deadline" does not.
+pub fn survivors(inv: &mut Invoker, pgid: i32) -> Vec<(i32, String)> {
+    let Ok(out) = inv.run("ps", &["-A", "-o", "pid=,pgid=,comm="]) else {
         // `ps` absent or failed: report no residue rather than invent one. The
         // caller treats an unmeasurable group as clean, which is the same
         // answer the OS gives when the group is genuinely empty.
-        return 0;
+        return Vec::new();
     };
-    count_in_group(&String::from_utf8_lossy(&out.stdout), pgid)
+    rows_in_group(&String::from_utf8_lossy(&out.stdout), pgid)
+}
+
+/// Parse a `ps -A -o pid=,pgid=,comm=` listing into the rows of one group.
+pub fn rows_in_group(listing: &str, pgid: i32) -> Vec<(i32, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let pid: i32 = f.next()?.parse().ok()?;
+            let group: i32 = f.next()?.parse().ok()?;
+            (group == pgid).then(|| {
+                let comm: Vec<&str> = f.collect();
+                (pid, comm.join(" "))
+            })
+        })
+        .collect()
 }
 
 /// Count the rows of a `ps -A -o pid=,pgid=` listing whose group matches.
@@ -301,6 +326,30 @@ mod tests {
                 "this process is in its own group, so the count cannot be zero"
             );
         }
+    }
+
+    #[test]
+    fn names_the_survivors_of_a_group() {
+        let listing = "\
+  101   101 sh
+  102   101 sleep 60
+  103   999 other
+";
+        assert_eq!(
+            rows_in_group(listing, 101),
+            vec![(101, "sh".to_string()), (102, "sleep 60".to_string())]
+        );
+        assert_eq!(
+            rows_in_group(listing, 999),
+            vec![(103, "other".to_string())]
+        );
+        assert!(rows_in_group(listing, 7).is_empty());
+    }
+
+    #[test]
+    fn a_row_without_a_command_still_counts_as_a_member() {
+        // A zombie has no comm on some platforms. It is still in the group.
+        assert_eq!(rows_in_group("5 5\n", 5), vec![(5, String::new())]);
     }
 
     #[test]

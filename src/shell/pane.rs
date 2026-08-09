@@ -224,10 +224,16 @@ pub fn launch(
     // process that ignored both withdone's SIGTERM/SIGKILL and tmux's SIGHUP,
     // which is rare and worth failing the attempt over.
     let deadline = Instant::now() + CLEANUP_DEADLINE;
-    let mut residue = proc::process_group_residue(inv, pgid);
-    while residue > 0 && Instant::now() < deadline {
+    let mut left = proc::survivors(inv, pgid);
+    while !left.is_empty() && Instant::now() < deadline {
         sleep(POLL);
-        residue = proc::process_group_residue(inv, pgid);
+        left = proc::survivors(inv, pgid);
+    }
+    let residue = left.len() as u32;
+    if residue > 0 {
+        // Naming them is the difference between a number and a diagnosis.
+        let who: Vec<String> = left.iter().map(|(p, c)| format!("{c} (pid {p})")).collect();
+        ui.state(&format!("still in the process group: {}", who.join(", ")));
     }
 
     // Three cases, and the middle one is the one a spike against `codex exec`
