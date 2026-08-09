@@ -50,8 +50,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Report the runner environment
+        # First, and cannot fail. With no log endpoint on this instance, a run
+        # that dies in the next step is otherwise indistinguishable from one
+        # that dies in the last, so record what we are standing on before
+        # touching anything.
+        continue-on-error: true
+        run: |
+          {
+            echo "MARKER: environment"
+            . /etc/os-release 2>/dev/null && echo "os: ${PRETTY_NAME:-unknown}"
+            echo "whoami: $(id -un 2>/dev/null || echo '?')  uid: $(id -u 2>/dev/null || echo '?')"
+            for p in apt-get sudo curl git tmux ps python3 cc rustup cargo; do
+              printf '%s=%s ' "$p" "$(command -v "$p" >/dev/null 2>&1 && echo yes || echo NO)"
+            done
+            echo
+          } 2>&1 | tee -a /tmp/circus-ci.log
+
       - name: Install the C toolchain and the programs circus composes
         run: |
+          echo "MARKER: apt" >> /tmp/circus-ci.log
           set -euo pipefail
           if ! command -v apt-get >/dev/null 2>&1; then
             echo "This job needs apt-get to install tmux, which circus invokes." >&2
@@ -70,12 +88,14 @@ jobs:
         # The explicit completion channel. Not on any package index — it is an
         # Anuna binary, installed the same way an operator installs it.
         run: |
+          echo "MARKER: withdone" >> /tmp/circus-ci.log
           set -euo pipefail
           curl -fsSL https://files.anuna.io/withdone/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Ensure the Rust toolchain
         run: |
+          echo "MARKER: rustup" >> /tmp/circus-ci.log
           set -euo pipefail
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -93,6 +113,7 @@ jobs:
         # inside the suite. REQ-007.a says circus invokes these rather than
         # reimplementing them; this is that requirement checked on the runner.
         run: |
+          echo "MARKER: boundary" >> /tmp/circus-ci.log
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
           missing=""
@@ -133,17 +154,20 @@ jobs:
         # ~15 of the 55 spec tests start a tmux pane; each isolates its server
         # through TMUX_TMPDIR, so they do not collide.
         run: |
+          echo "MARKER: test" >> /tmp/circus-ci.log
           set -o pipefail
           mkdir -p "$TMUX_TMPDIR"
           cargo test --locked 2>&1 | tee -a /tmp/circus-ci.log
 
       - name: Formatting
         run: |
+          echo "MARKER: fmt" >> /tmp/circus-ci.log
           set -o pipefail
           cargo fmt --check 2>&1 | tee -a /tmp/circus-ci.log
 
       - name: Clippy (deny warnings)
         run: |
+          echo "MARKER: clippy" >> /tmp/circus-ci.log
           set -o pipefail
           cargo clippy --all-targets --locked -- -D warnings 2>&1 | tee -a /tmp/circus-ci.log
 
@@ -153,6 +177,7 @@ jobs:
         # tests/purity.rs enforces the Purity Boundary Map's dependency rule,
         # and tests/traceability.rs decides the requirement-attribution map.
         run: |
+          echo "MARKER: gates" >> /tmp/circus-ci.log
           set -o pipefail
           cargo test --locked --test purity --test traceability 2>&1 | tee -a /tmp/circus-ci.log
 
@@ -162,19 +187,30 @@ jobs:
       # Borrowed from ../selfsame; delete it the day the instance grows a log
       # endpoint.
       - name: Report the first error into a commit status
+        # This Forgejo exposes no log endpoint, so a failed run is visible only
+        # as "Failing after Nm". Commit statuses ARE readable through the API,
+        # so the last progress marker and the first error line go into one.
+        #
+        # Deliberately free of python3, jq, and anything else this pipeline
+        # installs: the failure most worth reporting is the one that happened
+        # before the installs finished. `tr` and `sed` are in coreutils.
+        # Borrowed from ../selfsame; delete it the day the instance grows a log
+        # endpoint.
         if: failure()
         continue-on-error: true
         run: |
-          set -uo pipefail
-          line=$(grep -m1 -E '^(error|warning: unused|thread .* panicked|circus: )' /tmp/circus-ci.log 2>/dev/null \
-                 || tail -n 3 /tmp/circus-ci.log 2>/dev/null \
-                 || echo "no output captured — failed before the first cargo step")
-          line=$(printf '%s' "$line" | tr '\n' ' ' | cut -c1-240)
-          echo "reporting: ${line}"
+          set +e
+          where=$(grep -E '^MARKER: ' /tmp/circus-ci.log 2>/dev/null | tail -1 | sed 's/^MARKER: //')
+          [ -n "$where" ] || where="before the first step wrote a marker"
+          line=$(grep -m1 -E '^(error|E:|thread .* panicked|.*: command not found|.*No such file)' /tmp/circus-ci.log 2>/dev/null)
+          [ -n "$line" ] || line=$(tail -n 2 /tmp/circus-ci.log 2>/dev/null | tr '\n' ' ')
+          [ -n "$line" ] || line="no output captured"
+          desc=$(printf 'died in [%s]: %s' "$where" "$line" \
+                 | tr -d '"\\' | tr '\n\r\t' '   ' | cut -c1-240)
+          echo "reporting: ${desc}"
           curl -sS -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/json" \
             "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$(printf '{"context":"ci-diagnostic","state":"failure","description":%s}' \
-                  "$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")" \
-            >/dev/null || true
+            -d "{\"context\":\"ci-diagnostic\",\"state\":\"failure\",\"description\":\"${desc}\"}" \
+            || true
