@@ -189,3 +189,7 @@ The gate runs here rather than in the release pipeline for a reason: the suite
 drives real Git, tmux, and withdone, and the pipeline cross-compiles from Linux
 containers to four targets, none of which can run a tmux pane. `.forgejo/workflows/ci.yaml`
 runs it on every push; `release.sh` refuses to tag without it passing locally.
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).
