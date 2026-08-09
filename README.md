@@ -137,7 +137,8 @@ source; the reference pages restate them for a reader at work.
 ## Development
 
 Prerequisites: Rust 1.89 or later, Git, tmux, and
-[withdone](https://files.anuna.io/withdone/) on `PATH`.
+[withdone](https://git.anuna.io/anuna-research/withdone) on `PATH`.
+withdone is a single POSIX shell script; drop it anywhere on your `PATH`.
 
 ```sh
 cargo test            # 201 tests: unit, spec suite, purity, traceability

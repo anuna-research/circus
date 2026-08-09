@@ -107,7 +107,8 @@ check_companions() {
     warn "circus needs these on PATH and they are not installed:$_missing"
     case "$_missing" in
         *withdone*)
-            info "  withdone:  curl https://files.anuna.io/withdone/install.sh | sh" ;;
+            info "  withdone:  curl -fsSL https://git.anuna.io/anuna-research/withdone/raw/branch/main/withdone \\"
+            info "               -o ~/.local/bin/withdone && chmod +x ~/.local/bin/withdone" ;;
     esac
     case "$_missing" in
         *tmux*)

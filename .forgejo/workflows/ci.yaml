@@ -30,6 +30,13 @@ on:
   pull_request:
 
 env:
+  # withdone is a single POSIX shell script, not a published binary, and it is
+  # fetched at a pinned commit rather than from a branch. Its completion
+  # semantics are load-bearing for circus: ADR-009 turns on exactly when
+  # withdone reaps the process group relative to the child's own exit, so an
+  # upstream change there would silently alter what the suite proves. Bump this
+  # deliberately.
+  WITHDONE_REF: 3c1ce951a13a960c4336b67395b4b80072dbed7a
   # A short socket directory. A Unix domain socket path caps near 104 bytes and
   # tmux builds its socket path from this, so a deep default fails in a way
   # that reads as a tmux bug rather than a path-length one. It cost an hour
@@ -82,16 +89,23 @@ jobs:
           # procps: `ps`, which the process-group residue of OBS-003 is counted with.
           # python3: one lock test probes flock through it, and skips without it.
           $SUDO apt-get install -y --no-install-recommends \
-            build-essential pkg-config curl tmux procps python3
+            build-essential pkg-config curl tmux procps python3 2>&1 \
+            | tail -5 | tee -a /tmp/circus-ci.log
 
       - name: Install withdone
-        # The explicit completion channel. Not on any package index — it is an
-        # Anuna binary, installed the same way an operator installs it.
+        # The explicit completion channel, and a single POSIX shell script —
+        # there is no installer to pipe and nothing published to
+        # files.anuna.io. The first version of this step assumed both and 404'd
+        # into `sh`, which is what the ci-diagnostic step caught.
         run: |
           echo "MARKER: withdone" >> /tmp/circus-ci.log
           set -euo pipefail
-          curl -fsSL https://files.anuna.io/withdone/install.sh | sh
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://git.anuna.io/anuna-research/withdone/raw/commit/${WITHDONE_REF}/withdone" \
+            -o "$HOME/.local/bin/withdone"
+          chmod +x "$HOME/.local/bin/withdone"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/withdone" --version 2>&1 | tee -a /tmp/circus-ci.log
 
       - name: Ensure the Rust toolchain
         run: |
