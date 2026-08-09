@@ -6,11 +6,53 @@ actually finished, and refuses to call the result good on your behalf.
 It is a small ringmaster. It opens a ring for each act, records the result, and
 never decides whether the act was good.
 
+## Install
+
+```sh
+curl https://files.anuna.io/circus/install.sh | sh
+```
+
+The installer detects your platform, downloads the matching prebuilt binary,
+checks it against the published SHA-256, and installs it to `~/.local/bin`. No
+Rust toolchain is involved. Set `CIRCUS_INSTALL_DIR` to install elsewhere.
+
+Prebuilt binaries cover `darwin-arm64`, `darwin-x64`, `linux-x64`, and
+`linux-arm64`. The flat prefix <https://files.anuna.io/circus/> is the latest
+release. Every release also keeps an immutable copy at its own tag, such as
+<https://files.anuna.io/circus/v0.1.1/>, and
+<https://files.anuna.io/circus/version.json> names the current one.
+
+Circus invokes Git, tmux, and withdone rather than reimplementing them, so all
+three must be on `PATH`. The installer checks and names what is missing; it
+does not install them, because a harness that quietly pulls in three
+dependencies is not composing them. Git and tmux come from your package
+manager. withdone is one POSIX shell script:
+
+```sh
+mkdir -p ~/.local/bin
+curl -fsSL https://git.anuna.io/anuna-research/withdone/raw/branch/main/withdone \
+    -o ~/.local/bin/withdone && chmod +x ~/.local/bin/withdone
+```
+
+`withdone --version` MUST print `withdone 3.0.1` or later. Earlier versions
+reap nothing where `/bin/sh` is dash — Debian and Ubuntu among them — so an
+attempt whose agent leaves a subprocess behind is failed by NFR-002 for
+survivors withdone was supposed to have killed.
+
+The example drivers are published alongside the binaries and are not installed
+for you — see [Drivers](#drivers) for why:
+
+```sh
+curl -fsSL https://files.anuna.io/circus/drivers/circus-driver-codex \
+    -o ~/.local/bin/circus-driver-codex \
+    && chmod +x ~/.local/bin/circus-driver-codex
+```
+
+To build from source instead, see [Development](#development).
+
 ## Quick Start
 
 ```sh
-cargo install --path .
-
 # 1. Open a ring.
 circus prepare --task model --integration main
 # → prints a run record naming the attempt, its worktree, and its sentinel path
@@ -137,21 +179,15 @@ source; the reference pages restate them for a reader at work.
 
 ## Development
 
-Prerequisites: Rust 1.89 or later, Git, tmux, and
-[withdone](https://git.anuna.io/anuna-research/withdone) on `PATH`.
+Prerequisites: Rust 1.89 or later, plus the Git, tmux, and
+[withdone](https://git.anuna.io/anuna-research/withdone) that
+[Install](#install) covers. The version floor on withdone applies here too.
 
-withdone is a single POSIX shell script with no dependencies beyond the POSIX
-baseline, so installing it is a download:
+To build and install from a checkout:
 
 ```sh
-curl -fsSL https://git.anuna.io/anuna-research/withdone/raw/branch/main/withdone \
-    -o ~/.local/bin/withdone && chmod +x ~/.local/bin/withdone
+cargo install --path .
 ```
-
-`withdone --version` MUST print `withdone 3.0.1` or later. Earlier versions
-reap nothing on any system where `/bin/sh` is dash — Debian and Ubuntu among
-them — so every attempt whose agent leaves a subprocess behind is failed by
-NFR-002 for survivors withdone was supposed to have killed.
 
 ```sh
 cargo test            # 217 tests: unit, spec suite, purity, traceability
