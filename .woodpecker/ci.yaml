@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Anuna Research
+#
+# circus CI pipeline.
+#
+# Runs on every push and pull request: the full test suite, rustfmt, and
+# clippy. Nothing here uploads anything; publishing is .woodpecker/release.yaml,
+# triggered by a tag.
+#
+# circus composes Git, tmux, and withdone as external programs
+# (SPEC-001-circus-agent-harness#REQ-007.a), and its 55-entry spec suite drives
+# all three for real rather than mocking them — Constitutional Principle 5,
+# Integration-First Testing. So the container needs them installed, and a CI
+# failure that names a missing program is the suite telling the truth about its
+# environment rather than a flake.
+#
+# Each test isolates its tmux server through TMUX_TMPDIR, so the ~15 tests that
+# start panes never collide with one another.
+
+when:
+  - event: [push, pull_request]
+
+steps:
+  - name: test
+    image: rust:1-bookworm
+    environment:
+      # CI never runs a debugger, and the debug info for the test binaries is
+      # the bulk of the target tree on a shared runner. Incremental caching is
+      # pure disk waste on a one-shot build. Local builds are unaffected: this
+      # lives in the CI environment, not in Cargo.toml.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      # A short socket directory. A Unix domain socket path is capped near 104
+      # bytes, and tmux builds its socket path from this — a deep default is
+      # the one environment failure that looks like a tmux bug.
+      TMUX_TMPDIR: /tmp/tmux-ci
+    commands:
+      - rustup component add rustfmt clippy
+      # The three programs circus invokes. `procps` supplies `ps`, which
+      # OBS-003's process-group residue is measured with.
+      - apt-get update && apt-get install -y tmux procps python3
+      - curl -fsSL https://files.anuna.io/withdone/install.sh | sh
+      - export PATH="$HOME/.local/bin:$PATH"
+      - mkdir -p "$TMUX_TMPDIR"
+      # Fail early and legibly if the composition boundary is not satisfied,
+      # rather than through fifteen tests exiting 127.
+      - git --version && tmux -V && withdone --version
+      # The spec suite runs Git for real, and Git refuses to commit without an
+      # identity. Each fixture repository sets its own; this covers anything
+      # that reaches a global.
+      - git config --global user.email ci@anuna.io
+      - git config --global user.name "circus CI"
+      - git config --global init.defaultBranch main
+      - cargo test --verbose
+      - cargo fmt --check
+      - cargo clippy --all-targets -- -D warnings
+      # tests/purity.rs enforces the Purity Boundary Map's dependency rule and
+      # tests/traceability.rs decides the requirement-attribution map. Both run
+      # under `cargo test` above; naming them here makes the two gates visible
+      # in the pipeline log rather than buried in a count.
+      - cargo test --test purity --test traceability

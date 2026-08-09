@@ -7,3 +7,6 @@
 
 # zetl's local vault cache (index, search, jj store) — regenerated on demand
 /.zetl
+
+# staged release artifacts (make dist)
+/dist

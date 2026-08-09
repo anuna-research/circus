@@ -17,5 +17,13 @@ tempfile = "3"
 [lints.rust]
 unsafe_code = "forbid"
 
+[profile.release]
+# The dependency tree is three pure-Rust crates, so full LTO costs a few
+# seconds and needs none of the softening the heavier Anuna pipelines apply to
+# avoid OOM at cross-link time.
+lto = true
+codegen-units = 1
+strip = true
+
 [profile.test]
 opt-level = 1

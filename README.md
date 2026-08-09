@@ -154,8 +154,28 @@ it. `tests/traceability.rs` checks mechanically that every requirement atom
 reaches a test and that every test attributes an atom, so the traceability
 claim is decided rather than asserted.
 
-Specification hygiene:
+Or through the Makefile:
 
 ```sh
-zetl check --dead-links --fail-on error
+make check        # tests + fmt + clippy
+make mutants      # mutation-test the pure core
+make spec         # zetl link check + controlled-language check
+make docs-lint    # the same check across README, docs/, and drivers/
+make dist         # stage dist/circus-<os>-<arch> + .sha256 for this platform
 ```
+
+## Releasing
+
+```sh
+./release.sh 0.2.0
+```
+
+Bumps the version, runs the whole gate, commits, tags, and pushes. The tag
+triggers `.woodpecker/release.yaml`, which cross-compiles four binaries and
+publishes them with `scripts/install.sh` and the example drivers to
+<https://files.anuna.io/circus/>.
+
+The gate runs here rather than in the release pipeline for a reason: the suite
+drives real Git, tmux, and withdone, and the pipeline cross-compiles from Linux
+containers to four targets, none of which can run a tmux pane. `.woodpecker/ci.yaml`
+runs it on every push; `release.sh` refuses to tag without it passing locally.

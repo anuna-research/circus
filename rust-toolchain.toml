@@ -1,0 +1,6 @@
+[toolchain]
+# Track latest stable, matching the sibling Anuna repos (elephant, zetl).
+# circus is edition 2024 and uses let-chains and std::fs::File::lock, so the
+# floor is 1.89.
+channel = "stable"
+components = ["rustfmt", "clippy"]
