@@ -199,7 +199,9 @@ jobs:
       # `set -m` took effect, whether the group circus measured is the agent's
       # or the pane's, and what was left in it.
       - name: Probe one attempt, keeping the evidence
-        if: always()
+        # Only when something has already gone wrong. A green run has nothing
+        # to explain, and this costs a tmux session and half a minute.
+        if: failure()
         continue-on-error: true
         timeout-minutes: 5
         run: |
