@@ -36,7 +36,13 @@ env:
   # withdone reaps the process group relative to the child's own exit, so an
   # upstream change there would silently alter what the suite proves. Bump this
   # deliberately.
-  WITHDONE_REF: 3c1ce951a13a960c4336b67395b4b80072dbed7a
+  #
+  # v3.0.1 is the floor, not a preference. Before it, withdone's tree-kill
+  # reaped nothing under dash — /bin/sh on this runner — because its kill
+  # builtin rejects the `--` before a negative PID, and because the child
+  # inherited an ignored SIGTERM. NFR-002 counts survivors, so TEST-005 failed
+  # here and passed on macOS, where /bin/sh is bash.
+  WITHDONE_REF: df73f4f907af87de65866b711907384d3586fb12
   # A short socket directory. A Unix domain socket path caps near 104 bytes and
   # tmux builds its socket path from this, so a deep default fails in a way
   # that reads as a tmux bug rather than a path-length one. It cost an hour
@@ -226,11 +232,14 @@ jobs:
           set +e
           where=$(grep -E '^MARKER: ' /tmp/circus-ci.log 2>/dev/null | tail -1 | sed 's/^MARKER: //')
           [ -n "$where" ] || where="before the first step wrote a marker"
-          # An assertion message says more than the panic line above it, and
-          # the 240-character budget only fits one of them. Prefer the detail.
-          line=$(grep -m1 -E '^(launch exited|assertion|left:|error|E:|.*: command not found|.*No such file)' /tmp/circus-ci.log 2>/dev/null)
-          [ -n "$line" ] || line=$(grep -m1 -E 'thread .* panicked' /tmp/circus-ci.log 2>/dev/null)
-          [ -n "$line" ] || line=$(tail -n 2 /tmp/circus-ci.log 2>/dev/null | tr '\n' ' ')
+          # The panic line names the test; the line under it says why. Both
+          # matter and neither alone is enough, so take the test name from one
+          # and the detail from the other.
+          which=$(grep -m1 -oE "thread '[^']+'" /tmp/circus-ci.log 2>/dev/null | tr -d "thread '" )
+          detail=$(grep -m1 -E "^(\`|launch exited|assertion|left:|error|E:|.*: command not found|.*No such file)" /tmp/circus-ci.log 2>/dev/null)
+          [ -n "$detail" ] || detail=$(grep -m1 -A2 -E 'panicked at' /tmp/circus-ci.log 2>/dev/null | tail -n1)
+          [ -n "$detail" ] || detail=$(tail -n 2 /tmp/circus-ci.log 2>/dev/null | tr '\n' ' ')
+          line="${which:+[$which] }$detail"
           [ -n "$line" ] || line="no output captured"
           desc=$(printf 'died in [%s]: %s' "$where" "$line" \
                  | tr -d '"\\' | tr '\n\r\t' '   ' | cut -c1-240)

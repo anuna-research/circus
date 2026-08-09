@@ -29,11 +29,28 @@ pub struct Run {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// What was run, so a failure names itself. Without this, every failed
+    /// command in the suite asserts the same "expected success" — which is
+    /// what a commit status carried back from CI, four runs in a row.
+    pub argv: String,
 }
 
 impl Run {
     pub fn ok(&self) -> &Self {
-        assert_eq!(self.code, 0, "expected success\nstderr: {}", self.stderr);
+        // One line, because a commit status holds 240 characters and this is
+        // the only place a CI reader learns which command failed.
+        let said = self
+            .stderr
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .unwrap_or("(said nothing)");
+        assert!(
+            self.code == 0,
+            "`{}` exited {} — {}",
+            self.argv,
+            self.code,
+            said.trim()
+        );
         self
     }
     pub fn record(&self) -> Value {
@@ -82,6 +99,7 @@ impl Fx {
                 .current_dir(cwd)
                 .output()
                 .expect("git runs"),
+            format!("git {}", args.join(" ")),
         )
     }
 
@@ -98,7 +116,10 @@ impl Fx {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        into_run(cmd.output().expect("circus runs"))
+        into_run(
+            cmd.output().expect("circus runs"),
+            format!("circus {}", args.join(" ")),
+        )
     }
 
     /// Spawn Circus without waiting, for the concurrency tests.
@@ -283,6 +304,7 @@ impl Fx {
                 .env("TMUX_TMPDIR", &self.tmux_tmpdir)
                 .output()
                 .expect("tmux runs"),
+            format!("tmux {}", args.join(" ")),
         )
     }
 }
@@ -293,11 +315,12 @@ impl Drop for Fx {
     }
 }
 
-fn into_run(o: Output) -> Run {
+fn into_run(o: Output, argv: String) -> Run {
     Run {
         code: o.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+        argv,
     }
 }
 

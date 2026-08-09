@@ -148,10 +148,13 @@ curl -fsSL https://git.anuna.io/anuna-research/withdone/raw/branch/main/withdone
     -o ~/.local/bin/withdone && chmod +x ~/.local/bin/withdone
 ```
 
-`withdone --version` prints `withdone 3.0.0`.
+`withdone --version` MUST print `withdone 3.0.1` or later. Earlier versions
+reap nothing on any system where `/bin/sh` is dash — Debian and Ubuntu among
+them — so every attempt whose agent leaves a subprocess behind is failed by
+NFR-002 for survivors withdone was supposed to have killed.
 
 ```sh
-cargo test            # 201 tests: unit, spec suite, purity, traceability
+cargo test            # 217 tests: unit, spec suite, purity, traceability
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

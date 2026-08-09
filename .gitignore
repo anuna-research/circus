@@ -10,3 +10,6 @@
 
 # staged release artifacts (make dist)
 /dist
+
+# macOS Finder droppings
+.DS_Store
