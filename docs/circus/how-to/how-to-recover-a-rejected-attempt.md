@@ -24,7 +24,16 @@ ls "$(git rev-parse --git-common-dir)/circus/model"
 
 ## Steps
 
-1. Read why the decision went the way it did.
+1. See what has already been tried on this task.
+
+   ```sh
+   circus history --task model
+   ```
+
+   `changed nothing` against an attempt that reported success is the fastest
+   signal there is: the agent believed it was done and altered no files.
+
+2. Read why the decision went the way it did.
 
    ```sh
    cat "$(git rev-parse --git-common-dir)/circus/model/1/record.json"
@@ -33,7 +42,7 @@ ls "$(git rev-parse --git-common-dir)/circus/model"
    The `verifier` field names the command that ran and its exit code. The
    `output_path` field points at what it printed.
 
-2. Read what the agent did, in its own words.
+3. Read what the agent did, in its own words.
 
    ```sh
    less "$(git rev-parse --git-common-dir)/circus/model/1/transcript.log"

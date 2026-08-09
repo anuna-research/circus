@@ -2,7 +2,7 @@
 id: SPEC-001
 title: Circus Agent Harness
 status: implemented
-version: 0.6.0
+version: 0.7.0
 last-updated: 2026-08-09
 implemented-date: 2026-08-09
 ---
@@ -556,6 +556,77 @@ Trace:
 - [[SPEC-001-circus-agent-harness#TEST-054]] (c — scope-invariant)
 - [[SPEC-001-circus-agent-harness#TEST-055]] (d — negative)
 
+### REQ-014: Verifier Output Capture
+
+- **REQ-014.a** — At acceptance, Circus SHALL copy the verifier's captured
+  output into the attempt directory.
+- **REQ-014.b** — Circus SHALL bound that copy at 1 MiB, and SHALL record
+  whether it truncated.
+- **REQ-014.c** — Circus SHALL NOT modify the file the caller named.
+- **REQ-014.d** — WHEN the caller's output file is absent or unreadable, Circus
+  SHALL record the decision anyway.
+
+[[SPEC-001-circus-agent-harness#CON-003]] has always recorded `output_path`, and a path is not an artefact.
+The file it names is the caller's, living wherever the caller put it — often a
+temporary directory that is gone the next day. So
+[[SPEC-001-circus-agent-harness#NFR-001]].a promised a rejected attempt stays inspectable while the single
+most useful thing about it, what the verifier actually said, was a dangling
+pointer.
+
+[[SPEC-001-circus-agent-harness#REQ-014]].d keeps the capture out of the gate. The decision rests on the
+exit code and the evidence references — [[SPEC-001-circus-agent-harness#REQ-004]].c — so a missing log is
+a less complete record, never a refusal. A capture with the power to veto an
+acceptance is a second gate nobody specified.
+
+The 1 MiB bound exists because a verifier log has no natural size. Truncation
+is recorded rather than silent: a log that stops mid-sentence with no
+indication is worse than a short one, because a reader draws conclusions from
+where it ends.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-003]]
+- [[SPEC-001-circus-agent-harness#CON-007]]
+- [[SPEC-001-circus-agent-harness#TEST-056]] (a, b — positive)
+- [[SPEC-001-circus-agent-harness#TEST-057]] (c — scope-invariant)
+- [[SPEC-001-circus-agent-harness#TEST-058]] (d — negative)
+
+### REQ-015: Attempt History
+
+- **REQ-015.a** — `circus history` SHALL report every attempt of a task,
+  oldest first.
+- **REQ-015.b** — For each attempt it SHALL report the decision, the verifier
+  exit code, and what the task branch changed.
+- **REQ-015.c** — Circus SHALL NOT modify anything while reporting.
+
+The most useful context for attempt N is attempt N−1 of the same task, and
+Circus already holds all of it: [[SPEC-001-circus-agent-harness#NFR-001]].a keeps the worktree, the branch,
+the transcript, and the record of every attempt that was not accepted. Nothing
+read them back.
+
+This is deliberately not a memory system. It adds no store, no schema, and no
+eviction policy, because the data is already durable and already correctly
+scoped: an attempt supersedes its predecessor rather than decaying, and the
+task identifier is the key. What was missing was a reader.
+
+`circus history` writes prose to stdout rather than a record, because its
+output is prompt material and the composition is the point:
+
+```sh
+{ cat task.md; circus history --task parser; circus instruction --attempt parser/3; } > prompt.md
+```
+
+[[SPEC-001-circus-agent-harness#REQ-015]].b names *what the branch changed* rather than the transcript,
+because a terminal capture does not summarise and a diff does. An attempt that
+changed nothing while reporting success is the most useful single fact a later
+attempt can be told, and it costs one `git diff --shortstat`.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-012]]
+- [[SPEC-001-circus-agent-harness#TEST-059]] (a, b — positive)
+- [[SPEC-001-circus-agent-harness#TEST-060]] (c — prohibited-action)
+
 ### NFR-001: Recoverable Attempts
 
 - **NFR-001.a** — Circus SHALL preserve the worktree, branch, transcript log,
@@ -831,6 +902,10 @@ Post-conditions:
 - Circus records the verifier command, its exit code, its output path, and
   every evidence reference verbatim in the run record.
 - Circus makes no network call and starts no process while it decides.
+- Circus copies the verifier's `output_path` to `<attempt-dir>/verifier.log`,
+  bounded at 1 MiB, and records the copy and any truncation in the run record —
+  [[SPEC-001-circus-agent-harness#REQ-014]]. An absent or unreadable source leaves both unset and does not
+  change the decision.
 
 Error model:
 
@@ -855,6 +930,9 @@ Verified by:
 - [[SPEC-001-circus-agent-harness#TEST-021]]
 - [[SPEC-001-circus-agent-harness#TEST-022]]
 - [[SPEC-001-circus-agent-harness#TEST-023]]
+- [[SPEC-001-circus-agent-harness#TEST-056]]
+- [[SPEC-001-circus-agent-harness#TEST-057]]
+- [[SPEC-001-circus-agent-harness#TEST-058]]
 
 ### CON-004: Integration Merge
 
@@ -1049,6 +1127,8 @@ over it.
         "output_path": { "type": "string" }
       }
     },
+    "verifier_log": { "type": ["string", "null"] },
+    "verifier_log_truncated": { "type": "boolean" },
     "evidence_refs": { "type": "array", "items": { "type": "string" } },
     "decision":      { "enum": ["accepted", "rejected", null] },
     "merge": {
@@ -1076,6 +1156,10 @@ over it.
 ```
 
 Every timestamp is RFC 3339 with a `Z` offset.
+
+`verifier_log` is Circus's own copy of the verifier output, and is distinct
+from `verifier.output_path`, which is where the caller left the original. The
+copy is the one that survives — [[SPEC-001-circus-agent-harness#REQ-014]].
 
 Pre-conditions:
 
@@ -1294,6 +1378,49 @@ Verified by:
 - [[SPEC-001-circus-agent-harness#TEST-053]]
 - [[SPEC-001-circus-agent-harness#TEST-054]]
 - [[SPEC-001-circus-agent-harness#TEST-055]]
+
+### CON-012: Attempt History
+
+Interface: `circus history --task TASK`.
+
+Input grammar:
+
+```abnf
+TASK = task
+```
+
+Pre-conditions:
+
+- `TASK` is recognised in full.
+
+Post-conditions:
+
+- Circus writes one entry per attempt of `TASK` to stdout, oldest first.
+- Each entry names the attempt, its decision, the verifier command and exit
+  code, what the task branch changed against the recorded integration ref, and
+  the paths to the transcript and the captured verifier log.
+- A task with no attempts writes nothing and returns 0.
+- Circus creates, modifies, and deletes nothing.
+
+Unlike every other command, stdout carries prose rather than a record. The
+output is prompt material, and [[SPEC-001-circus-agent-harness#REQ-008]].b fixes the stream, not the
+format: this command's primary output is text a caller concatenates into a
+prompt.
+
+Error model:
+
+- An unrecognised `TASK` returns exit 64.
+- An attempt whose record fails schema recognition is reported as unreadable
+  and skipped. One bad record does not withhold the rest of the history.
+
+Implements:
+
+- [[SPEC-001-circus-agent-harness#REQ-015]]
+
+Verified by:
+
+- [[SPEC-001-circus-agent-harness#TEST-059]]
+- [[SPEC-001-circus-agent-harness#TEST-060]]
 
 ## Architecture Decisions
 
@@ -2123,6 +2250,46 @@ Given a driver that is not executable, the lead spawns an attempt. The command
 exits non-zero, and the worktree, branch, and record of the prepared attempt
 all remain.
 
+### TEST-056: Capture the Verifier Output
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-014]].a, [[SPEC-001-circus-agent-harness#REQ-014]].b — positive
+
+Given a verifier record naming a readable output file, the lead accepts the
+attempt. `<attempt-dir>/verifier.log` holds that file's bytes, and the run
+record names it with `verifier_log_truncated` false. Given a source over 1 MiB,
+the copy is 1 MiB and the flag is true.
+
+### TEST-057: Leave the Caller's Output Alone
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-014]].c — scope-invariant
+
+Given a verifier output file, the lead accepts the attempt. The caller's file
+is byte-identical afterwards.
+
+### TEST-058: Accept Without a Readable Verifier Output
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-014]].d — negative
+
+Given a verifier record whose `output_path` does not exist, the lead accepts
+the attempt. Circus records the same decision it records with a readable
+output file, and `verifier_log` is null.
+
+### TEST-059: Report Every Attempt of a Task
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-015]].a, [[SPEC-001-circus-agent-harness#REQ-015]].b — positive
+
+Given a rejected attempt and an accepted one, `circus history` writes both to
+stdout, oldest first, each naming its decision and verifier exit code. An
+attempt whose branch changed nothing says so. A task with no attempts writes
+nothing and returns 0.
+
+### TEST-060: Report History Without Touching
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-015]].c — prohibited-action
+
+Given two attempts, the lead runs `circus history`. Every file under the state
+root is byte-identical afterwards, and no ref moved.
+
 ## Observability
 
 ### OBS-001: Attempt Lifecycle Record
@@ -2241,7 +2408,7 @@ gates:
   - gate: "Every TEST entry implemented and green"
     mechanism: "cargo test"
     result: pass
-    evidence: "2026-08-09 — 201 passed, 0 failed across 6 suites in 40s: 134 unit, 55 spec (TEST-001..055), 3 purity, 9 traceability"
+    evidence: "2026-08-09 — 215 passed, 0 failed across 6 suites in 45s: 143 unit, 60 spec (TEST-001..060), 3 purity, 9 traceability"
   - gate: "A full-screen agent runs under a driver"
     mechanism: "manual: circus launch -- circus-driver-claude-tui against Claude Code 2.1.226"
     result: fail
@@ -2318,7 +2485,21 @@ record a validated design.
 ## Changelog
 
 <details>
-<summary>Revision history — 0.1.0 → 0.6.0</summary>
+<summary>Revision history — 0.1.0 → 0.7.0</summary>
+
+- 0.7.0 — normative. Added
+  [[SPEC-001-circus-agent-harness#REQ-014]] and
+  [[SPEC-001-circus-agent-harness#REQ-015]].
+  [[SPEC-001-circus-agent-harness#CON-003]] has always recorded the verifier's
+  `output_path`, and a path is not an artefact — the file it named was usually
+  in a temporary directory and gone by the next day, so
+  [[SPEC-001-circus-agent-harness#NFR-001]].a promised an inspectable rejected
+  attempt while its most useful part was a dangling pointer. Acceptance now
+  copies that output beside the attempt, capped at 1 MiB, and records the
+  truncation. [[SPEC-001-circus-agent-harness#CON-012]] adds
+  `circus history`, a reader over the attempts
+  [[SPEC-001-circus-agent-harness#NFR-001]].a already preserves: no store, no
+  schema, no eviction. Added five tests.
 
 - 0.6.0 — normative. Added three commands and the requirements behind them.
   [[SPEC-001-circus-agent-harness#REQ-011]] and

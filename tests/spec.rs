@@ -2092,6 +2092,235 @@ fn test_055_keeps_a_prepared_attempt_when_the_launch_fails() {
     assert_eq!(fx.record("model/1")["state"], "prepared");
 }
 
+// ── REQ-014 / REQ-015: the verifier log, and attempt history ───────────────
+
+/// TEST-056 — REQ-014.a, REQ-014.b. Positive.
+#[test]
+fn test_056_captures_the_verifier_output() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_complete("model");
+
+    let out = fx.raw_file("verifier-out.txt", "pytest -q\n1 failed, 2 passed\n");
+    let vr = fx.raw_file(
+        "v-real.json",
+        &serde_json::json!({
+            "command": ["pytest", "-q"],
+            "exit_code": 0,
+            "output_path": out.to_string_lossy(),
+        })
+        .to_string(),
+    );
+    fx.circus(&[
+        "accept",
+        "--attempt",
+        &id,
+        "--verifier-record",
+        vr.to_str().unwrap(),
+        "--evidence",
+        "theory:q1",
+    ])
+    .ok();
+
+    let rec = fx.record(&id);
+    let captured = rec["verifier_log"].as_str().expect("a captured log path");
+    assert_eq!(rec["verifier_log_truncated"], false);
+    assert_eq!(
+        fs::read_to_string(captured).unwrap(),
+        "pytest -q\n1 failed, 2 passed\n",
+        "the copy must hold the verifier's bytes"
+    );
+    assert!(
+        Path::new(captured).starts_with(fx.attempt_dir(&id)),
+        "the copy belongs beside the attempt: {captured}"
+    );
+
+    // Over the bound, the copy is capped and says so.
+    let big = fx.prepare_and_complete("big");
+    let huge = fx.raw_file("huge.txt", &"x".repeat(1024 * 1024 + 4096));
+    let vr2 = fx.raw_file(
+        "v-huge.json",
+        &serde_json::json!({
+            "command": ["yes"],
+            "exit_code": 0,
+            "output_path": huge.to_string_lossy(),
+        })
+        .to_string(),
+    );
+    fx.circus(&[
+        "accept",
+        "--attempt",
+        &big,
+        "--verifier-record",
+        vr2.to_str().unwrap(),
+        "--evidence",
+        "theory:q2",
+    ])
+    .ok();
+    let rec2 = fx.record(&big);
+    assert_eq!(rec2["verifier_log_truncated"], true);
+    assert_eq!(
+        fs::metadata(rec2["verifier_log"].as_str().unwrap())
+            .unwrap()
+            .len(),
+        1024 * 1024
+    );
+}
+
+/// TEST-057 — REQ-014.c. Scope-invariant.
+#[test]
+fn test_057_leaves_the_callers_output_alone() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_complete("model");
+    let out = fx.raw_file("verifier-out.txt", "untouched\n");
+    let before = fs::read(&out).unwrap();
+    let vr = fx.raw_file(
+        "v.json",
+        &serde_json::json!({
+            "command": ["true"], "exit_code": 0, "output_path": out.to_string_lossy(),
+        })
+        .to_string(),
+    );
+
+    fx.circus(&[
+        "accept",
+        "--attempt",
+        &id,
+        "--verifier-record",
+        vr.to_str().unwrap(),
+        "--evidence",
+        "theory:q1",
+    ])
+    .ok();
+
+    assert_eq!(fs::read(&out).unwrap(), before, "the caller's file changed");
+}
+
+/// TEST-058 — REQ-014.d. Negative.
+#[test]
+fn test_058_accepts_without_a_readable_verifier_output() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_complete("model");
+    let vr = fx.raw_file(
+        "v-missing.json",
+        r#"{"command":["true"],"exit_code":0,"output_path":"/nonexistent/verifier.txt"}"#,
+    );
+
+    let r = fx.circus(&[
+        "accept",
+        "--attempt",
+        &id,
+        "--verifier-record",
+        vr.to_str().unwrap(),
+        "--evidence",
+        "theory:q1",
+    ]);
+    r.ok();
+
+    let rec = fx.record(&id);
+    assert_eq!(
+        rec["decision"], "accepted",
+        "a missing log must not veto the gate"
+    );
+    assert_eq!(rec["state"], "accepted");
+    assert!(rec["verifier_log"].is_null());
+    assert_eq!(rec["verifier_log_truncated"], false);
+}
+
+/// TEST-059 — REQ-015.a, REQ-015.b. Positive.
+#[test]
+fn test_059_reports_every_attempt_of_a_task() {
+    let fx = Fx::new();
+
+    let empty = fx.circus(&["history", "--task", "nothing"]);
+    empty.ok();
+    assert_eq!(empty.stdout, "", "a task with no attempts writes nothing");
+
+    // Attempt 1: rejected, and changed nothing.
+    let first = fx.prepare_and_complete("parser");
+    fx.circus(&[
+        "accept",
+        "--attempt",
+        &first,
+        "--verifier-record",
+        fx.verifier_record(1).to_str().unwrap(),
+        "--evidence",
+        "theory:q1",
+    ]);
+
+    // Attempt 2: accepted, with a commit.
+    let second = fx.prepare_and_complete("parser");
+    let wt = fx.worktree_of(&second);
+    fs::write(wt.join("fix.txt"), "fixed\n").unwrap();
+    fx.git_in(&wt, &["add", "-A"]).ok();
+    fx.git_in(&wt, &["commit", "-q", "-m", "the fix"]).ok();
+    fx.circus(&[
+        "accept",
+        "--attempt",
+        &second,
+        "--verifier-record",
+        fx.verifier_record(0).to_str().unwrap(),
+        "--evidence",
+        "theory:q2",
+    ])
+    .ok();
+
+    let r = fx.circus(&["history", "--task", "parser"]);
+    r.ok();
+    let out = &r.stdout;
+
+    let one = out.find("parser/1").expect("attempt 1 reported");
+    let two = out.find("parser/2").expect("attempt 2 reported");
+    assert!(one < two, "oldest first:\n{out}");
+    assert!(out.contains("rejected"), "the verdict of attempt 1:\n{out}");
+    assert!(out.contains("accepted"), "the verdict of attempt 2:\n{out}");
+    assert!(out.contains("exit 1"), "attempt 1's verifier exit:\n{out}");
+    assert!(out.contains("exit 0"), "attempt 2's verifier exit:\n{out}");
+    assert!(
+        out.contains("changed    nothing"),
+        "an attempt that changed nothing must say so:\n{out}"
+    );
+    assert!(out.contains("the fix"), "attempt 2's commit:\n{out}");
+
+    let bad = fx.circus(&["history", "--task", "BAD"]);
+    assert_eq!(bad.code, 64, "stderr: {}", bad.stderr);
+}
+
+/// TEST-060 — REQ-015.c. Prohibited-action.
+#[test]
+fn test_060_reports_history_without_touching() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_accept("parser", "work.txt");
+
+    let snapshot = |root: &Path| -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    out.push((
+                        e.path().to_string_lossy().into_owned(),
+                        fs::read(e.path()).unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+
+    let before = snapshot(&fx.state_root());
+    let refs_before = fx.git(&["show-ref"]).stdout;
+
+    fx.circus(&["history", "--task", "parser"]).ok();
+
+    assert_eq!(snapshot(&fx.state_root()), before, "the state root changed");
+    assert_eq!(fx.git(&["show-ref"]).stdout, refs_before, "a ref moved");
+    assert!(fx.record_exists(&id));
+}
+
 /// TEST-031 — NFR-001.b. Prohibited-action.
 #[test]
 fn test_031_never_deletes_attempt_state() {

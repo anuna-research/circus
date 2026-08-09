@@ -144,6 +144,13 @@ pub struct RunRecord {
     pub external_programs: Vec<ExternalProgram>,
     #[serde(default)]
     pub verifier: Option<VerifierRecord>,
+    /// Circus's own copy of the verifier output, distinct from
+    /// `verifier.output_path`, which names where the caller left the original.
+    /// This is the one that survives — `#REQ-014`.
+    #[serde(default)]
+    pub verifier_log: Option<String>,
+    #[serde(default)]
+    pub verifier_log_truncated: bool,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
     #[serde(default)]
@@ -187,6 +194,8 @@ impl RunRecord {
             external_programs: Vec::new(),
             evidence_refs: Vec::new(),
             verifier: None,
+            verifier_log: None,
+            verifier_log_truncated: false,
             decision: None,
             merge: None,
             timestamps: Timestamps {
@@ -276,6 +285,8 @@ mod tests {
             exit_code: 0,
             output_path: "/tmp/v.txt".into(),
         });
+        r.verifier_log = Some("/repo/.git/circus/model/1/verifier.log".into());
+        r.verifier_log_truncated = true;
         r.evidence_refs = vec!["theory:spec-001/q1".into()];
         r.decision = Some(Decision::Accepted);
         r.merge = Some(Merge {
@@ -336,6 +347,8 @@ mod tests {
         // TEST-028 — both the populated and the absent shape of every nullable.
         let mut r = full();
         r.verifier = None;
+        r.verifier_log = None;
+        r.verifier_log_truncated = false;
         r.merge = None;
         r.decision = None;
         r.sentinel_value = None;

@@ -154,6 +154,12 @@ is absolute. No other property is accepted.
 Records `accepted` only when the exit code is 0 and at least one reference is
 present. Records `rejected` otherwise, and exits 1.
 
+The verifier's `output_path` is copied to `<attempt-dir>/verifier.log`, capped
+at 1 MiB, and the record names the copy. The caller's file is not modified, and
+it is usually the copy that survives — a verifier writing into a temporary
+directory leaves nothing behind by the next day. An unreadable source is
+recorded as absent and never changes the decision.
+
 An evidence reference is recorded verbatim and never resolved. Circus cannot
 tell a real reference from a plausible string; establishing that is the lead's
 work, done before acceptance.
@@ -184,6 +190,34 @@ A launch failure leaves the prepared attempt standing — the worktree, branch,
 and record all remain, and Circus never deletes an attempt.
 
 Contract: CON-011.
+
+## `circus history`
+
+```
+circus history --task TASK
+```
+
+| Argument | Type | Default | Constraint |
+|---|---|---|---|
+| `--task` | `task` | — | Required |
+
+Writes one entry per attempt of the task to stdout, oldest first: the verdict,
+the verifier command and exit code, the captured log, the evidence, what the
+branch changed, and the transcript path. A task with no attempts writes nothing
+and exits 0.
+
+Unlike every other command, stdout carries prose rather than a record. The
+output is prompt material:
+
+```sh
+{ cat task.md; circus history --task parser; circus instruction --attempt parser/3; } > prompt.md
+```
+
+`changed nothing` is the line worth reading first. An attempt that reported
+success while altering no files is the most useful single fact a later attempt
+can be given, and no transcript states it as plainly as a diff does.
+
+Contract: CON-012.
 
 ## `circus status`
 

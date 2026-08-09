@@ -47,6 +47,9 @@ Examples:
   # Record your own verdict. Circus never forms one.
   circus accept --attempt model/1 --verifier-record v.json --evidence theory:q42
 
+  # What has already been tried on this task, for the next prompt.
+  circus history --task model
+
   # Look in on it from another terminal while it runs.
   circus status --attempt model/1
   circus logs --attempt model/1 --follow --plain
@@ -169,6 +172,13 @@ enum Command {
         plain: bool,
     },
 
+    /// Report every attempt of a task: what was tried, and what came of it.
+    History {
+        /// The task whose attempts to report.
+        #[arg(long)]
+        task: String,
+    },
+
     /// Report what is true of an attempt right now, recorded and live.
     Status {
         /// One attempt. Omit to report every attempt in the repository.
@@ -269,6 +279,7 @@ fn main() -> ExitCode {
             follow,
             plain,
         } => logs(&mut inv, ui, &attempt, follow, plain),
+        Command::History { task } => history(&mut inv, ui, &task),
         Command::Status { attempt } => status(&mut inv, ui, attempt.as_deref()),
         Command::Instruction { attempt } => instruction(&mut inv, ui, &attempt),
         Command::Merge {
@@ -633,6 +644,27 @@ fn accept(
 
     let decision = acceptance_decision(verifier.exit_code, &refs);
 
+    // `#REQ-014` — the record has always named the caller's output_path, and a
+    // path is not an artefact. Copy it beside the attempt so a rejected one is
+    // inspectable later, as `#NFR-001.a` promises. Deliberately after the
+    // decision is computed and unable to affect it: `#REQ-014.d`.
+    match state::capture_verifier_log(
+        Path::new(&verifier.output_path),
+        &paths.attempt_dir.join("verifier.log"),
+    ) {
+        Some((path, truncated)) => {
+            rec.verifier_log = Some(path.to_string_lossy().into_owned());
+            rec.verifier_log_truncated = truncated;
+            if truncated {
+                ui.hint("the verifier log was longer than 1 MiB and was truncated");
+            }
+        }
+        None => ui.hint(&format!(
+            "could not read the verifier output at {}; the decision stands",
+            verifier.output_path
+        )),
+    }
+
     rec.evidence_refs = refs.iter().map(|r| r.as_str().to_owned()).collect();
     rec.verifier = Some(verifier);
     rec.decision = Some(decision);
@@ -722,6 +754,102 @@ fn logs(inv: &mut Invoker, ui: Ui, attempt: &str, follow: bool, plain: bool) -> 
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+// ── CON-012 ────────────────────────────────────────────────────────────────
+
+fn history(inv: &mut Invoker, ui: Ui, task: &str) -> Result<i32> {
+    let task = Task::recognise(task)?;
+    let cwd = cwd()?;
+    let roots = state::discover_roots(inv, &cwd)?;
+
+    let ids: Vec<AttemptId> = shell_status::all_attempts(&roots)
+        .into_iter()
+        .filter(|i| i.task == task)
+        .collect();
+
+    if ids.is_empty() {
+        ui.state(&format!("no attempts for `{task}` yet"));
+        ui.hint(&format!(
+            "next: circus prepare --task {task} --integration <ref>"
+        ));
+        return Ok(exit::OK);
+    }
+
+    for id in &ids {
+        let p = paths::attempt_paths(&roots, id);
+        let rec = match shell_status::record_of(&roots, id) {
+            Ok(r) => r,
+            // One unreadable record does not withhold the rest — `#CON-012`.
+            Err(e) => {
+                println!("attempt {id}  —  unreadable ({e})\n");
+                continue;
+            }
+        };
+
+        let verdict = rec
+            .decision
+            .map(|d| format!("{d:?}").to_lowercase())
+            .unwrap_or_else(|| format!("{:?}", rec.state).to_lowercase());
+        println!("attempt {id}  —  {verdict}");
+
+        if let Some(v) = &rec.verifier {
+            println!(
+                "  verifier   {} → exit {}",
+                v.command.join(" "),
+                v.exit_code
+            );
+        }
+        if let Some(log) = &rec.verifier_log {
+            let note = if rec.verifier_log_truncated {
+                " (truncated at 1 MiB)"
+            } else {
+                ""
+            };
+            println!("  log        {log}{note}");
+        }
+        if !rec.evidence_refs.is_empty() {
+            println!("  evidence   {}", rec.evidence_refs.join(", "));
+        }
+
+        // What the branch changed says more than a terminal capture does, and
+        // an attempt that changed nothing while reporting success is the single
+        // most useful fact a later attempt can be told — `#REQ-015.b`.
+        let range = format!("{}...{}", rec.integration_ref, rec.branch);
+        let changed = inv
+            .run_ok_in("git", &["diff", "--shortstat", &range], Some(&cwd))
+            .unwrap_or_default();
+        println!(
+            "  changed    {}",
+            if changed.is_empty() {
+                "nothing"
+            } else {
+                changed.trim()
+            }
+        );
+        let commits = inv
+            .run_ok_in(
+                "git",
+                &[
+                    "log",
+                    "--oneline",
+                    &format!("{}..{}", rec.integration_ref, rec.branch),
+                ],
+                Some(&cwd),
+            )
+            .unwrap_or_default();
+        for c in commits.lines() {
+            println!("    {c}");
+        }
+
+        if p.log.exists() {
+            println!("  transcript {}", p.log.display());
+        }
+        println!();
+    }
+
+    ui.state(&format!("{} attempt(s) for `{task}`", ids.len()));
+    Ok(exit::OK)
 }
 
 // ── CON-009 ────────────────────────────────────────────────────────────────

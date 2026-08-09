@@ -35,6 +35,8 @@ A record that fails the schema exits 65 and causes no state transition.
 | `process_group_residue` | integer | `0` | Live processes at the deadline |
 | `external_programs` | array | `[]` | Every program Circus invoked |
 | `verifier` | object or null | `null` | `command`, `exit_code`, `output_path` |
+| `verifier_log` | string or null | `null` | Circus's copy of the verifier output |
+| `verifier_log_truncated` | boolean | `false` | Whether the copy hit the 1 MiB cap |
 | `evidence_refs` | array of string | `[]` | Recorded verbatim, never resolved |
 | `decision` | enum or null | `null` | `accepted` `rejected` |
 | `merge` | object or null | `null` | `result`, `commit` |

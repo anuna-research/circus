@@ -60,6 +60,7 @@ thing, writes the record back, and prints it.
 | `spawn` | `prepare` and `launch` in one, composing the prompt for you |
 | `status` | What is true of an attempt now, recorded and live |
 | `logs` | What the agent itself printed |
+| `history` | Every attempt of a task, and what came of each |
 
 Every command takes `-q`/`--quiet`, `-v`/`--verbose`, and `--no-color`.
 `circus merge` takes `-n`/`--dry-run`. stdout carries the run record as JSON and

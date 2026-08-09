@@ -142,6 +142,45 @@ pub fn write_record(path: &Path, rec: &RunRecord) -> Result<()> {
     Ok(())
 }
 
+/// The most Circus copies of a verifier log — `#REQ-014.b`.
+///
+/// A verifier log has no natural size, and the attempt directory is meant to
+/// stay inspectable rather than become an archive.
+pub const VERIFIER_LOG_LIMIT: u64 = 1024 * 1024;
+
+/// Copy the verifier's output beside the attempt — `#REQ-014`.
+///
+/// Returns where it landed and whether it was truncated, or `None` when the
+/// source cannot be read. An unreadable source is not an error: `#REQ-014.d`
+/// keeps the capture out of the acceptance gate, which rests on the exit code
+/// and the evidence references alone.
+///
+/// The source is opened read-only and never written, so `#REQ-014.c` holds by
+/// construction.
+pub fn capture_verifier_log(source: &Path, dest: &Path) -> Option<(PathBuf, bool)> {
+    use std::io::Read;
+
+    let file = File::open(source).ok()?;
+    let mut buf = Vec::new();
+    // Read one byte past the limit, so a source of exactly the limit is not
+    // reported as truncated. `File` implements both Read and Write, so the
+    // adaptor is named through the trait rather than by method call.
+    Read::take(file, VERIFIER_LOG_LIMIT + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+
+    let truncated = buf.len() as u64 > VERIFIER_LOG_LIMIT;
+    if truncated {
+        buf.truncate(VERIFIER_LOG_LIMIT as usize);
+    }
+
+    if let Some(dir) = dest.parent() {
+        fs::create_dir_all(dir).ok()?;
+    }
+    fs::write(dest, &buf).ok()?;
+    Some((dest.to_path_buf(), truncated))
+}
+
 /// Whether an attempt directory already exists.
 pub fn attempt_exists(attempt_dir: &Path) -> bool {
     attempt_dir.exists()
@@ -241,6 +280,67 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let e = read_record(&d.path().join("nope.json")).unwrap_err();
         assert_eq!(e.code(), crate::exit::USAGE);
+    }
+
+    #[test]
+    fn a_verifier_log_is_copied_verbatim() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("v.txt");
+        fs::write(&src, b"pytest\n1 failed\n").unwrap();
+        let dest = d.path().join("a/verifier.log");
+
+        let (path, truncated) = capture_verifier_log(&src, &dest).unwrap();
+        assert_eq!(path, dest);
+        assert!(!truncated);
+        assert_eq!(fs::read(&dest).unwrap(), b"pytest\n1 failed\n");
+        // REQ-014.c — the caller's file is untouched.
+        assert_eq!(fs::read(&src).unwrap(), b"pytest\n1 failed\n");
+    }
+
+    #[test]
+    fn a_log_at_the_limit_is_not_reported_as_truncated() {
+        // The off-by-one that would mislabel an exactly-sized log.
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("v.txt");
+        fs::write(&src, vec![b'x'; VERIFIER_LOG_LIMIT as usize]).unwrap();
+        let (_, truncated) = capture_verifier_log(&src, &d.path().join("out.log")).unwrap();
+        assert!(!truncated, "exactly the limit is whole, not truncated");
+    }
+
+    #[test]
+    fn an_oversized_log_is_bounded_and_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("v.txt");
+        fs::write(&src, vec![b'x'; VERIFIER_LOG_LIMIT as usize + 5000]).unwrap();
+        let dest = d.path().join("out.log");
+        let (_, truncated) = capture_verifier_log(&src, &dest).unwrap();
+        assert!(truncated);
+        assert_eq!(fs::metadata(&dest).unwrap().len(), VERIFIER_LOG_LIMIT);
+    }
+
+    #[test]
+    fn an_unreadable_source_is_none_rather_than_an_error() {
+        // REQ-014.d — a missing log must not be able to veto an acceptance.
+        let d = tempfile::tempdir().unwrap();
+        assert!(capture_verifier_log(&d.path().join("nope"), &d.path().join("o")).is_none());
+        assert!(
+            capture_verifier_log(d.path(), &d.path().join("o2")).is_none(),
+            "a directory"
+        );
+    }
+
+    #[test]
+    fn an_empty_log_is_still_captured() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("empty.txt");
+        fs::write(&src, b"").unwrap();
+        let dest = d.path().join("out.log");
+        let (_, truncated) = capture_verifier_log(&src, &dest).unwrap();
+        assert!(!truncated);
+        assert!(
+            dest.exists(),
+            "an empty verifier log is a fact, not an absence"
+        );
     }
 
     #[test]
