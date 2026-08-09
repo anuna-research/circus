@@ -6,6 +6,15 @@ actually finished, and refuses to call the result good on your behalf.
 It is a small ringmaster. It opens a ring for each act, records the result, and
 never decides whether the act was good.
 
+```sh
+echo "Fix the failing test." | circus spawn --task fix --integration main --task-file - -- circus-driver-codex
+```
+
+One worktree, one branch, one tmux pane, one run record — under a second from
+command to running agent. Circus tells you when the agent stopped; you decide
+whether it succeeded. The driver on the end is your own executable — see
+[Drivers](#drivers).
+
 ## Install
 
 ```sh
