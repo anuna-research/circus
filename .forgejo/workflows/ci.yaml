@@ -189,6 +189,68 @@ jobs:
           mkdir -p "$TMUX_TMPDIR"
           cargo test --locked 2>&1 | tee -a /tmp/circus-ci.log
 
+      # One attempt, driven by hand, with the artefacts kept.
+      #
+      # The suite deletes each fixture on drop, so a launch that fails in CI
+      # takes its transcript and its recorded process group with it, and what
+      # reaches us is a count with no way to explain itself. Three rounds went
+      # on inferring from that count. This runs the same path once and reports
+      # the four facts that separate the candidate causes: whether withdone's
+      # `set -m` took effect, whether the group circus measured is the agent's
+      # or the pane's, and what was left in it.
+      - name: Probe one attempt, keeping the evidence
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          echo "MARKER: probe" >> /tmp/circus-ci.log
+          set -u
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          C="$PWD/target/debug/circus"
+          [ -x "$C" ] || C="$PWD/target/release/circus"
+          if [ ! -x "$C" ]; then
+            echo "probe: no circus binary built" | tee -a /tmp/circus-ci.log
+            exit 0
+          fi
+
+          # `pwd -P`: circus records the physical path, so a temp root reached
+          # through a symlink gives two spellings of one directory and the
+          # prompt's literal sentinel path fails to match.
+          W=$(cd "$(mktemp -d)" && pwd -P)
+          mkdir -p "$W/repo"; cd "$W/repo"
+          git init -q .
+          git config user.email ci@anuna.io; git config user.name ci
+          echo hi > f.txt; git add -A; git commit -qm init
+
+          # Ask git, rather than assuming "$W/repo/.git": circus resolves the
+          # common dir, and on a platform where the temp root is a symlink the
+          # two spellings differ — enough for the prompt's literal sentinel
+          # path to miss, which is how this probe failed the first time it ran.
+          S="$(cd "$W/repo" && git rev-parse --git-common-dir)/circus/model/1"
+          case "$S" in /*) ;; *) S="$W/repo/$S" ;; esac
+          "$C" prepare --task model --integration main >/dev/null 2>&1
+          printf 'when done: echo 0 > %s\n' "$S/sentinel" > "$W/prompt.md"
+          printf '#!/bin/sh\necho hello\necho 0 > %s\nsleep 30\n' "$S/sentinel" > "$W/drv"
+          chmod +x "$W/drv"
+
+          "$C" launch --attempt model/1 --prompt "$W/prompt.md" -- "$W/drv" \
+            > "$W/launch.out" 2>&1 || true
+
+          pg=$(cat "$S/pgid" 2>/dev/null)
+          # dash says so on stderr, and the pane's stderr is the transcript.
+          jc=no
+          grep -q 'job control' "$S/transcript.log" 2>/dev/null && jc=YES-DISABLED
+          left=$(ps -A -o pgid=,pid=,comm= | awk -v g="${pg:--1}" '$1==g {printf "%s(%s) ", $3, $2}')
+          shell=$(readlink -f /bin/sh 2>/dev/null)
+
+          probe="sh=$shell wd=$(withdone --version 2>&1) jobctl-off=$jc pgid=${pg:-none} residue=[${left:-empty}]"
+          echo "$probe" | tee -a /tmp/circus-ci.log
+          echo "--- launch output ---"     | tee -a /tmp/circus-ci.log
+          tail -5 "$W/launch.out"          | tee -a /tmp/circus-ci.log
+          echo "--- transcript ---"        | tee -a /tmp/circus-ci.log
+          head -20 "$S/transcript.log" 2>/dev/null | tee -a /tmp/circus-ci.log
+          printf '%s' "$probe" > /tmp/circus-probe.txt
+
       - name: Formatting
         run: |
           echo "MARKER: fmt" >> /tmp/circus-ci.log
@@ -262,7 +324,10 @@ jobs:
           # test_006_rejects_a_transport_only_outcome into s_006_jcs__nspo_only_oucom.
           [ -n "$which" ] || which=$(grep -m1 -oE "thread '[^']+'" /tmp/circus-ci.log 2>/dev/null \
                                      | sed "s/^thread '//; s/'\$//")
-          tally=$(grep -m1 -oE '[0-9]+ passed; [0-9]+ failed' /tmp/circus-ci.log 2>/dev/null)
+          # The suite that FAILED, not the first one to report. `grep -m1` took
+          # the unit tests' "145 passed; 0 failed" and printed it beside a list
+          # of five failing spec tests.
+          tally=$(grep -oE '[0-9]+ passed; [1-9][0-9]* failed' /tmp/circus-ci.log 2>/dev/null | head -1)
           detail=$(grep -m1 -E "^(\`|launch exited|assertion|left:|error|E:|.*: command not found|.*No such file)" /tmp/circus-ci.log 2>/dev/null)
           [ -n "$detail" ] || detail=$(grep -m1 -A2 -E 'panicked at' /tmp/circus-ci.log 2>/dev/null | tail -n1)
           [ -n "$detail" ] || detail=$(tail -n 2 /tmp/circus-ci.log 2>/dev/null | tr '\n' ' ')
@@ -270,10 +335,35 @@ jobs:
           [ -n "$line" ] || line="no output captured"
           desc=$(printf 'died in [%s]: %s' "$where" "$line" \
                  | tr -d '"\\' | tr '\n\r\t' '   ' | cut -c1-240)
+          post() {  # $1 context, $2 description
+            curl -sS -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+              -d "{\"context\":\"$1\",\"state\":\"failure\",\"description\":\"$2\"}" \
+              || true
+          }
+
           echo "reporting: ${desc}"
-          curl -sS -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "{\"context\":\"ci-diagnostic\",\"state\":\"failure\",\"description\":\"${desc}\"}" \
-            || true
+          post ci-diagnostic "${desc}"
+
+          # A second status, because the artifact above is write-only from
+          # here: this Forgejo serves no API for run logs or artifacts, so a
+          # file kept on the server is a file nobody can read. Statuses are
+          # the only channel out, and these are the two facts that decide a
+          # cleanup failure — which withdone actually ran, and what survived
+          # it. Both are one line and both were guessed at for two rounds.
+          ver=$(grep -m1 -oE 'withdone [0-9]+\.[0-9]+\.[0-9]+' /tmp/circus-ci.log 2>/dev/null)
+          survivors=$(grep -m1 -oE 'still in the process group:.*' /tmp/circus-ci.log 2>/dev/null)
+          evidence=$(printf '%s | %s' "${ver:-withdone version not logged}" \
+                                      "${survivors:-no survivor line}" \
+                     | tr -d '"\\' | tr '\n\r\t' '   ' | cut -c1-240)
+          echo "reporting: ${evidence}"
+          post ci-evidence "${evidence}"
+
+          probe=$(cat /tmp/circus-probe.txt 2>/dev/null \
+                  | tr -d '"\\' | tr '\n\r\t' '   ' | cut -c1-240)
+          if [ -n "$probe" ]; then
+            echo "reporting: ${probe}"
+            post ci-probe "${probe}"
+          fi
