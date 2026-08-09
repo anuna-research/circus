@@ -160,6 +160,86 @@ work, done before acceptance.
 
 Contract: CON-003. Signals: OBS-002.
 
+## `circus spawn`
+
+```
+circus spawn --task TASK --integration REF --task-file FILE [--attempt N] -- DRIVER [ARGS...]
+```
+
+| Argument | Type | Default | Constraint |
+|---|---|---|---|
+| `--task` | `task` | — | Required |
+| `--integration` | `ref` | — | Required; must resolve to a commit |
+| `--task-file` | path or `-` | — | `-` reads the task from stdin |
+| `--attempt` | `attempt-n` | Lowest unused | Must not already exist |
+
+`prepare` and `launch` under one command, with the step between them done for
+you: the prompt is the task file followed by the attempt's completion
+instruction, written to `<attempt-dir>/prompt`.
+
+Your task file is never modified, and the composed prompt is kept where the
+rest of the attempt lives, so you can read exactly what the agent was sent.
+
+A launch failure leaves the prepared attempt standing — the worktree, branch,
+and record all remain, and Circus never deletes an attempt.
+
+Contract: CON-011.
+
+## `circus status`
+
+```
+circus status [--attempt ATTEMPT]
+```
+
+| Argument | Type | Default | Constraint |
+|---|---|---|---|
+| `--attempt` | `attempt-id` | every attempt | A run record must exist |
+
+Reports each attempt as recorded and as observed right now. With `--attempt`,
+stdout carries one object; without it, an array ordered by task then attempt
+number. Creates and modifies nothing.
+
+| `live` field | Meaning |
+|---|---|
+| `pane` | The tmux session name |
+| `pane_alive` | Whether tmux still holds it |
+| `running_for_seconds` | Seconds since launch, while still running |
+| `sentinel_present` | Whether the agent has signalled |
+| `worktree_present` | Whether the attempt worktree is on disk |
+| `worktree_dirty` | Whether it has uncommitted changes |
+| `commits_ahead` | Commits on the task branch over the integration ref |
+| `transcript_bytes` | Size of the transcript |
+
+A running attempt's record still reads `prepared`, because the state advances
+only when the launch returns. `pane_alive` is the live answer.
+
+Contract: CON-009. Signals: OBS-005.
+
+## `circus logs`
+
+```
+circus logs --attempt ATTEMPT [--follow] [--plain]
+```
+
+| Argument | Type | Default | Constraint |
+|---|---|---|---|
+| `--attempt` | `attempt-id` | — | A run record must exist |
+| `-f`, `--follow` | flag | off | Keep writing until the attempt stops |
+| `--plain` | flag | off | Remove terminal control sequences |
+
+Writes what the agent itself printed. The transcript is a capture of a
+terminal, so raw output carries colour and cursor movement; `--plain` removes
+them. An attempt that has printed nothing yields empty output and exit 0.
+
+`--follow` returns on its own when the pane goes away, which is what it has
+over `tail -f`.
+
+`tmux attach -t circus-<task>-<attempt>` shows the same thing live and
+interactively, and is the better choice for a person watching. `circus logs`
+is the one that puts bytes on stdout for a program.
+
+Contract: CON-010.
+
 ## `circus instruction`
 
 ```

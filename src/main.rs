@@ -9,9 +9,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
+use circus::core::ansi;
 use circus::core::decision::acceptance_decision;
 use circus::core::grammar::{AttemptId, AttemptN, EvidenceRef, Task};
 use circus::core::instruction::instruction_text;
@@ -20,11 +22,12 @@ use circus::core::prompt::recognise_prompt;
 use circus::core::record::{
     self, CompletionMethod, Decision, Merge, MergeOutcome, RunRecord, State,
 };
-use circus::core::time::now_rfc3339;
+use circus::core::time::{UnixSeconds, now_rfc3339};
 use circus::core::verifier;
 use circus::exit;
 use circus::shell::proc::Invoker;
-use circus::shell::ui::{Level, Ui};
+use circus::shell::status as shell_status;
+use circus::shell::ui::{self, Level, Ui};
 use circus::shell::{Error, Result, git, pane, state};
 
 const EXAMPLES: &str = "\
@@ -32,14 +35,21 @@ Examples:
   # Open a ring. Prints a run record naming the attempt and its sentinel path.
   circus prepare --task model --integration main
 
-  # Build a prompt whose completion instruction Circus itself supplies.
-  { cat task.md; circus instruction --attempt model/1; } > prompt.md
+  # Or do all three at once. Circus appends the completion instruction to
+  # your task file; the file itself is not modified.
+  circus spawn --task model --integration main \
+      --task-file task.md -- circus-driver-codex
 
-  # Run an agent in it.
+  # The long way, when you want to write the prompt yourself.
+  { cat task.md; circus instruction --attempt model/1; } > prompt.md
   circus launch --attempt model/1 --prompt prompt.md -- circus-driver-codex
 
   # Record your own verdict. Circus never forms one.
   circus accept --attempt model/1 --verifier-record v.json --evidence theory:q42
+
+  # Look in on it from another terminal while it runs.
+  circus status --attempt model/1
+  circus logs --attempt model/1 --follow --plain
 
   # See whether it would conflict, then merge.
   circus merge --attempt model/1 --into main --dry-run
@@ -99,6 +109,26 @@ enum Command {
         attempt: Option<String>,
     },
 
+    /// Prepare an attempt and launch it, in one command.
+    Spawn {
+        /// Task identifier: a lowercase letter, then up to 62 of [a-z0-9-].
+        #[arg(long)]
+        task: String,
+        /// The branch or commit the attempt starts from.
+        #[arg(long)]
+        integration: String,
+        /// The task description. `-` reads it from stdin. Circus appends the
+        /// completion instruction; your file is not modified.
+        #[arg(long)]
+        task_file: PathBuf,
+        /// Attempt number. Allocated automatically when omitted.
+        #[arg(long)]
+        attempt: Option<String>,
+        /// The driver to run, and its arguments.
+        #[arg(last = true, required = true)]
+        driver: Vec<String>,
+    },
+
     /// Start a prepared attempt in a named tmux pane, through withdone.
     Launch {
         /// The `task/attempt` handle printed by `prepare`.
@@ -124,6 +154,26 @@ enum Command {
         /// never resolved.
         #[arg(long, required = true, num_args = 1..)]
         evidence: Vec<String>,
+    },
+
+    /// Write an attempt's transcript — what the agent itself printed.
+    Logs {
+        /// The `task/attempt` handle.
+        #[arg(long)]
+        attempt: String,
+        /// Keep writing until the attempt stops running.
+        #[arg(short, long)]
+        follow: bool,
+        /// Remove terminal control sequences.
+        #[arg(long)]
+        plain: bool,
+    },
+
+    /// Report what is true of an attempt right now, recorded and live.
+    Status {
+        /// One attempt. Omit to report every attempt in the repository.
+        #[arg(long)]
+        attempt: Option<String>,
     },
 
     /// Print the completion instruction a prompt for this attempt needs.
@@ -189,6 +239,21 @@ fn main() -> ExitCode {
             integration,
             attempt,
         } => prepare(&mut inv, ui, &task, &integration, attempt.as_deref()),
+        Command::Spawn {
+            task,
+            integration,
+            task_file,
+            attempt,
+            driver,
+        } => spawn(
+            &mut inv,
+            ui,
+            &task,
+            &integration,
+            &task_file,
+            attempt.as_deref(),
+            &driver,
+        ),
         Command::Launch {
             attempt,
             prompt,
@@ -199,6 +264,12 @@ fn main() -> ExitCode {
             verifier_record,
             evidence,
         } => accept(&mut inv, ui, &attempt, &verifier_record, &evidence),
+        Command::Logs {
+            attempt,
+            follow,
+            plain,
+        } => logs(&mut inv, ui, &attempt, follow, plain),
+        Command::Status { attempt } => status(&mut inv, ui, attempt.as_deref()),
         Command::Instruction { attempt } => instruction(&mut inv, ui, &attempt),
         Command::Merge {
             attempt,
@@ -249,6 +320,19 @@ fn prepare(
     integration: &str,
     attempt: Option<&str>,
 ) -> Result<i32> {
+    let (_, paths, rec) = do_prepare(inv, ui, task, integration, attempt)?;
+    finish(inv, &paths.record, rec, exit::OK)
+}
+
+/// The whole of `#CON-001`, without printing. `spawn` reuses it, which is what
+/// keeps `#REQ-013` a shorthand for two contracts rather than a third one.
+fn do_prepare(
+    inv: &mut Invoker,
+    ui: Ui,
+    task: &str,
+    integration: &str,
+    attempt: Option<&str>,
+) -> Result<(AttemptId, AttemptPaths, RunRecord)> {
     let task = Task::recognise(task)?;
     let requested = attempt.map(AttemptN::recognise).transpose()?;
     let cwd = cwd()?;
@@ -320,7 +404,52 @@ fn prepare(
         "next: circus launch --attempt {id} --prompt <file> -- <driver>"
     ));
 
-    finish(inv, &paths.record, rec, exit::OK)
+    Ok((id, paths, rec))
+}
+
+// ── CON-011 ────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn spawn(
+    inv: &mut Invoker,
+    ui: Ui,
+    task: &str,
+    integration: &str,
+    task_file: &Path,
+    attempt: Option<&str>,
+    driver: &[String],
+) -> Result<i32> {
+    // Read the task before preparing anything. A missing file is a usage
+    // error, and finding that out after a worktree exists leaves an attempt
+    // nobody asked for.
+    let task_bytes = if task_file == Path::new("-") {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        buf
+    } else {
+        std::fs::read(task_file).map_err(|e| {
+            Error::usage(format!(
+                "cannot read the task at {}: {e}",
+                task_file.display()
+            ))
+        })?
+    };
+
+    let (id, paths, rec) = do_prepare(inv, ui, task, integration, attempt)?;
+
+    // `{ cat task; circus instruction; }`, done here — `#REQ-013.b`. It is
+    // written into the attempt directory and nowhere else, so the caller's
+    // file is untouched and the composed prompt stays readable.
+    let composed = paths.attempt_dir.join("prompt");
+    let mut bytes = task_bytes;
+    bytes.extend_from_slice(instruction_text(&paths.sentinel).as_bytes());
+    std::fs::write(&composed, &bytes)?;
+    ui.hint(&format!("prompt:    {}", composed.display()));
+
+    // A launch failure leaves the prepared attempt standing — `#REQ-013.d`,
+    // which follows from NFR-001.b.
+    do_launch(inv, ui, &id, &paths, rec, &composed, driver)
 }
 
 // ── CON-002 ────────────────────────────────────────────────────────────────
@@ -333,12 +462,40 @@ fn launch(
     driver: &[String],
 ) -> Result<i32> {
     let (_roots, id, paths) = locate(inv, attempt)?;
-    let mut rec = state::read_record(&paths.record)?;
+    let rec = state::read_record(&paths.record)?;
+    do_launch(inv, ui, &id, &paths, rec, prompt, driver)
+}
 
+/// The whole of `#CON-002`, taking the record its caller already read.
+fn do_launch(
+    inv: &mut Invoker,
+    ui: Ui,
+    id: &AttemptId,
+    paths: &AttemptPaths,
+    mut rec: RunRecord,
+    prompt: &Path,
+    driver: &[String],
+) -> Result<i32> {
     if rec.state != State::Prepared {
         return Err(Error::usage(format!(
             "attempt `{id}` is `{:?}` and cannot be launched; prepare a new attempt",
             rec.state
+        )));
+    }
+    // A `prepared` record whose pane is alive is an attempt someone is
+    // watching, or was until they interrupted the launch. Refusing here says
+    // so; without it tmux refuses a duplicate session name and the operator
+    // has to work out why.
+    if rec.timestamps.launched_at.is_some()
+        && inv
+            .run("tmux", &["has-session", "-t", &paths.pane_name])
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    {
+        return Err(Error::usage(format!(
+            "attempt `{id}` is already running in pane `{}`; \
+             watch it with `tmux attach -t {}`",
+            paths.pane_name, paths.pane_name
         )));
     }
 
@@ -380,7 +537,13 @@ fn launch(
     rec.sentinel_path = Some(paths.sentinel.to_string_lossy().into_owned());
     rec.timestamps.launched_at = Some(now_rfc3339());
 
-    let outcome = match pane::launch(inv, &paths, driver_name, args, &env, ui) {
+    // Persist before waiting, not after. The pane outlives this process, so a
+    // `circus launch` that is interrupted leaves an agent working with no
+    // record of it — and `circus status` has nothing to report. Writing here
+    // is what makes `#REQ-011.a` answerable for a running attempt.
+    state::write_record(&paths.record, &rec)?;
+
+    let outcome = match pane::launch(inv, paths, driver_name, args, &env, ui) {
         Ok(o) => o,
         Err(e) => {
             // The attempt stays `prepared` so a fixed environment can relaunch
@@ -501,6 +664,129 @@ fn accept(
         }
     };
     finish(inv, &paths.record, rec, code)
+}
+
+// ── CON-010 ────────────────────────────────────────────────────────────────
+
+fn logs(inv: &mut Invoker, ui: Ui, attempt: &str, follow: bool, plain: bool) -> Result<i32> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let (_roots, id, paths) = locate(inv, attempt)?;
+    // Reading the record is what makes this a statement about a real attempt,
+    // and it is the pre-condition CON-010 states.
+    let _rec = state::read_record(&paths.record)?;
+
+    let emit = |bytes: &[u8]| {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(&if plain {
+            ansi::strip(bytes)
+        } else {
+            bytes.to_vec()
+        });
+        let _ = out.flush();
+    };
+
+    let Ok(mut file) = std::fs::File::open(&paths.log) else {
+        // A prepared attempt has printed nothing. That is an answer.
+        ui.state(&format!("{id} has produced no output yet"));
+        return Ok(exit::OK);
+    };
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    emit(&buf);
+    if !follow {
+        return Ok(exit::OK);
+    }
+
+    ui.state(&format!("following {id}; it stops when the attempt does"));
+    let mut pos = file.stream_position()?;
+    loop {
+        let alive = inv
+            .run("tmux", &["has-session", "-t", &paths.pane_name])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        file.seek(SeekFrom::Start(pos))?;
+        let mut chunk = Vec::new();
+        file.read_to_end(&mut chunk)?;
+        if chunk.is_empty() {
+            // Nothing new, and nothing left to produce it — `#REQ-012.b`.
+            if !alive {
+                ui.state(&format!("{id} stopped"));
+                return Ok(exit::OK);
+            }
+        } else {
+            pos += chunk.len() as u64;
+            emit(&chunk);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+// ── CON-009 ────────────────────────────────────────────────────────────────
+
+fn status(inv: &mut Invoker, ui: Ui, attempt: Option<&str>) -> Result<i32> {
+    let cwd = cwd()?;
+    let roots = state::discover_roots(inv, &cwd)?;
+    let now = UnixSeconds::now();
+
+    let one = |inv: &mut Invoker, id: &AttemptId| -> Result<circus::shell::status::Status> {
+        let rec = shell_status::record_of(&roots, id)?;
+        shell_status::observe(inv, &roots, &cwd, id, &rec, now)
+    };
+
+    // With an attempt, one object. Without, an array — `#CON-009`.
+    let (rendered, reports) = match attempt {
+        Some(a) => {
+            let id = AttemptId::recognise(a)?;
+            let s = one(inv, &id)?;
+            (serde_json::to_string_pretty(&s), vec![s])
+        }
+        None => {
+            let mut all = Vec::new();
+            for id in shell_status::all_attempts(&roots) {
+                // A record that will not parse should not hide every other
+                // attempt from the listing.
+                match one(inv, &id) {
+                    Ok(s) => all.push(s),
+                    Err(e) => ui.hint(&format!("skipping {id}: {e}")),
+                }
+            }
+            (serde_json::to_string_pretty(&all), all)
+        }
+    };
+    println!("{}", rendered.expect("a status document always serialises"));
+
+    for s in &reports {
+        let live = &s.live;
+        let recorded = format!("{:?}", s.attempt.state).to_lowercase();
+        // A running attempt's record still reads `prepared`, because the state
+        // only advances once the launch returns. Leading with the live fact and
+        // naming the recorded one second says both without contradicting itself.
+        if live.pane_alive {
+            let elapsed = live
+                .running_for_seconds
+                .map(|n| ui::human_duration(Duration::from_secs(n as u64)))
+                .unwrap_or_else(|| "an unknown time".into());
+            ui.state(&format!(
+                "{} — running for {elapsed} (recorded: {recorded})",
+                s.attempt.attempt_id
+            ));
+            ui.emphasis(&format!("watch it:  tmux attach -t {}", live.pane));
+            ui.hint(&format!(
+                "read it:   circus logs --attempt {} --follow --plain",
+                s.attempt.attempt_id
+            ));
+        } else {
+            ui.state(&format!("{} — {recorded}", s.attempt.attempt_id));
+        }
+    }
+    if reports.is_empty() {
+        ui.state("no attempts in this repository");
+        ui.hint("next: circus prepare --task <name> --integration <ref>");
+    }
+    Ok(exit::OK)
 }
 
 // ── CON-008 ────────────────────────────────────────────────────────────────

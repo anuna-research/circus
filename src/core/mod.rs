@@ -5,6 +5,7 @@
 //! rejecting it. Downstream code consumes the typed value, never the raw
 //! bytes — LangSec principle 7, "separate recognition from interpretation".
 
+pub mod ansi;
 pub mod decision;
 pub mod grammar;
 pub mod instruction;

@@ -1653,6 +1653,431 @@ fn test_044_keeps_the_instruction_off_the_record_stream() {
     assert_eq!(bad.stdout, "");
 }
 
+// ── REQ-011: inspecting an attempt ─────────────────────────────────────────
+
+/// TEST-045 — REQ-011.a. Positive.
+#[test]
+fn test_045_reports_a_recorded_attempt() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+
+    let r = fx.circus(&["status", "--attempt", &id]);
+    r.ok();
+
+    let s: serde_json::Value = serde_json::from_str(&r.stdout).expect("one status object");
+    assert_eq!(
+        s["attempt"],
+        fx.record(&id),
+        "the record must appear unchanged"
+    );
+    assert_eq!(s["live"]["pane"], "circus-model-1");
+    assert_eq!(s["live"]["pane_alive"], false);
+    assert!(
+        s["live"]["running_for_seconds"].is_null(),
+        "nothing launched yet"
+    );
+    assert_eq!(s["live"]["sentinel_present"], false);
+    assert_eq!(s["live"]["worktree_present"], true);
+    assert_eq!(s["live"]["worktree_dirty"], false);
+    assert_eq!(s["live"]["commits_ahead"], 0);
+
+    // An attempt that does not exist is a usage error.
+    let bad = fx.circus(&["status", "--attempt", "nosuch/1"]);
+    assert_eq!(bad.code, 64, "stderr: {}", bad.stderr);
+}
+
+/// TEST-046 — REQ-011.a. Positive, live.
+#[test]
+fn test_046_reports_an_attempt_that_is_still_running() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+    let drv = fx.script("slow", "echo working; sleep 60\n");
+
+    let child = fx.circus_spawn(&[
+        "launch",
+        "--attempt",
+        &id,
+        "--prompt",
+        fx.prompt(&id).to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ]);
+    wait_until("the pane to appear", || {
+        fx.tmux(&["list-windows", "-a", "-F", "#{window_name}"])
+            .stdout
+            .contains("circus-model-1")
+    });
+    // Give the record its launched_at, written before the wait begins.
+    sleep(Duration::from_millis(1500));
+
+    let r = fx.circus(&["status", "--attempt", &id]);
+    r.ok();
+    let s: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+
+    assert_eq!(
+        s["live"]["pane_alive"], true,
+        "the pane is up: {}",
+        r.stdout
+    );
+    assert!(
+        s["live"]["running_for_seconds"].is_number(),
+        "elapsed should be reported while running: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("tmux attach -t circus-model-1"),
+        "a running attempt should say how to watch it: {}",
+        r.stderr
+    );
+
+    fs::write(fx.sentinel_of(&id), "0\n").unwrap();
+    let _ = child.wait_with_output().unwrap();
+}
+
+/// TEST-047 — REQ-011.b. Positive.
+#[test]
+fn test_047_reports_every_attempt() {
+    let fx = Fx::new();
+
+    let empty = fx.circus(&["status"]);
+    empty.ok();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&empty.stdout).unwrap(),
+        serde_json::json!([]),
+        "an empty repository yields an empty array"
+    );
+
+    fx.prepare("beta");
+    fx.prepare("alpha");
+    fx.prepare("alpha");
+
+    let r = fx.circus(&["status"]);
+    r.ok();
+    let all: Vec<serde_json::Value> = serde_json::from_str(&r.stdout).expect("an array");
+    let ids: Vec<&str> = all
+        .iter()
+        .map(|s| s["attempt"]["attempt_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["alpha/1", "alpha/2", "beta/1"],
+        "task then attempt number"
+    );
+}
+
+/// TEST-048 — REQ-011.c. Prohibited-action, scope-invariant.
+#[test]
+fn test_048_reports_without_touching() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_complete("model");
+
+    let snapshot = |root: &Path| -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    out.push((
+                        e.path().to_string_lossy().into_owned(),
+                        fs::read(e.path()).unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+
+    let state_before = snapshot(&fx.state_root());
+    let head_before = fx.git(&["rev-parse", "HEAD"]).stdout;
+    let refs_before = fx.git(&["show-ref"]).stdout;
+    let wt = fx.worktree_of(&id);
+    let wt_status_before = fx.git_in(&wt, &["status", "--porcelain"]).stdout;
+
+    fx.circus(&["status", "--attempt", &id]).ok();
+    fx.circus(&["status"]).ok();
+
+    assert_eq!(
+        snapshot(&fx.state_root()),
+        state_before,
+        "the state root changed"
+    );
+    assert_eq!(
+        fx.git(&["rev-parse", "HEAD"]).stdout,
+        head_before,
+        "HEAD moved"
+    );
+    assert_eq!(fx.git(&["show-ref"]).stdout, refs_before, "a ref moved");
+    assert_eq!(
+        fx.git_in(&wt, &["status", "--porcelain"]).stdout,
+        wt_status_before,
+        "the attempt worktree changed"
+    );
+}
+
+// ── REQ-012: the agent's own output ────────────────────────────────────────
+
+/// TEST-049 — REQ-012.a. Positive.
+#[test]
+fn test_049_writes_the_transcript() {
+    let fx = Fx::new();
+
+    let fresh = fx.prepare("quiet");
+    let none = fx.circus(&["logs", "--attempt", &fresh]);
+    none.ok();
+    assert_eq!(none.stdout, "", "a prepared attempt has printed nothing");
+
+    let id = fx.prepare_and_complete("model");
+    let r = fx.circus(&["logs", "--attempt", &id]);
+    r.ok();
+    assert!(
+        r.stdout.contains("out"),
+        "stdout line missing: {:?}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("err"),
+        "stderr line missing: {:?}",
+        r.stdout
+    );
+
+    let bad = fx.circus(&["logs", "--attempt", "nosuch/1"]);
+    assert_eq!(bad.code, 64, "stderr: {}", bad.stderr);
+}
+
+/// TEST-050 — REQ-012.b. Positive.
+#[test]
+fn test_050_follows_a_running_attempt() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+    let drv = fx.script(
+        "chatty",
+        &format!(
+            "echo FIRST\nsleep 4\necho SECOND\necho 0 > {}\nsleep 30\n",
+            fx.sentinel_of(&id).display()
+        ),
+    );
+
+    let launch = fx.circus_spawn(&[
+        "launch",
+        "--attempt",
+        &id,
+        "--prompt",
+        fx.prompt(&id).to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ]);
+    wait_until("the first line to appear", || {
+        fs::read_to_string(fx.log_of(&id))
+            .map(|s| s.contains("FIRST"))
+            .unwrap_or(false)
+    });
+
+    // Follow returns on its own once the attempt stops — no kill needed.
+    let r = fx.circus(&["logs", "--attempt", &id, "--follow", "--plain"]);
+    r.ok();
+    assert!(r.stdout.contains("FIRST"), "missing FIRST: {:?}", r.stdout);
+    assert!(
+        r.stdout.contains("SECOND"),
+        "follow should have kept reading: {:?}",
+        r.stdout
+    );
+
+    let _ = launch.wait_with_output().unwrap();
+}
+
+/// TEST-051 — REQ-012.c. Positive.
+#[test]
+fn test_051_strips_terminal_control_sequences() {
+    let fx = Fx::new();
+    let id = fx.prepare("model");
+    let drv = fx.script(
+        "colourful",
+        &format!(
+            "printf '\\033[31mRED\\033[0m\\r\\n'\necho 0 > {}\nsleep 30\n",
+            fx.sentinel_of(&id).display()
+        ),
+    );
+    fx.circus(&[
+        "launch",
+        "--attempt",
+        &id,
+        "--prompt",
+        fx.prompt(&id).to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ])
+    .ok();
+
+    let plain = fx.circus(&["logs", "--attempt", &id, "--plain"]);
+    plain.ok();
+    assert!(
+        plain.stdout.contains("RED"),
+        "text lost: {:?}",
+        plain.stdout
+    );
+    assert!(
+        !plain.stdout.contains('\u{1b}'),
+        "an escape survived --plain: {:?}",
+        plain.stdout
+    );
+    assert!(!plain.stdout.contains('\r'), "a carriage return survived");
+
+    let raw = fx.circus(&["logs", "--attempt", &id]);
+    raw.ok();
+    assert!(
+        raw.stdout.contains('\u{1b}'),
+        "raw output should keep the escapes: {:?}",
+        raw.stdout
+    );
+}
+
+/// TEST-052 — REQ-012.d. Prohibited-action.
+#[test]
+fn test_052_reads_without_writing() {
+    let fx = Fx::new();
+    let id = fx.prepare_and_complete("model");
+
+    let log_before = fs::read(fx.log_of(&id)).unwrap();
+    let record_before = fs::read(fx.attempt_dir(&id).join("record.json")).unwrap();
+
+    fx.circus(&["logs", "--attempt", &id]).ok();
+    fx.circus(&["logs", "--attempt", &id, "--plain"]).ok();
+    fx.circus(&["logs", "--attempt", &id, "--follow"]).ok();
+
+    assert_eq!(
+        fs::read(fx.log_of(&id)).unwrap(),
+        log_before,
+        "the transcript changed"
+    );
+    assert_eq!(
+        fs::read(fx.attempt_dir(&id).join("record.json")).unwrap(),
+        record_before,
+        "the record changed"
+    );
+}
+
+// ── REQ-013: one-step spawn ────────────────────────────────────────────────
+
+/// TEST-053 — REQ-013.a, REQ-013.b. Positive.
+#[test]
+fn test_053_prepares_and_launches_under_one_command() {
+    let fx = Fx::new();
+    let task = fx.raw_file("task.md", "Fix the failing test in add.py.\n");
+    // The driver cannot know the sentinel path in advance, so it reads the one
+    // Circus handed it — which is what proves the composed prompt reached it.
+    let drv = fx.script(
+        "reader",
+        "grep -q \"$CIRCUS_SENTINEL\" \"$CIRCUS_PROMPT\" || exit 9\n\
+         echo 0 > \"$CIRCUS_SENTINEL\"\nsleep 30\n",
+    );
+
+    let r = fx.circus(&[
+        "spawn",
+        "--task",
+        "model",
+        "--integration",
+        INTEGRATION,
+        "--task-file",
+        task.to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ]);
+    r.ok();
+
+    let rec = r.record();
+    assert_eq!(rec["attempt_id"], "model/1");
+    assert_eq!(rec["state"], "completed");
+    assert_eq!(rec["completion_method"], "sentinel");
+    assert_eq!(
+        fx.git(&["worktree", "list"]).stdout.lines().count(),
+        2,
+        "exactly one attempt worktree"
+    );
+
+    let composed = fs::read_to_string(fx.attempt_dir("model/1").join("prompt")).unwrap();
+    assert!(
+        composed.starts_with("Fix the failing test in add.py."),
+        "{composed}"
+    );
+    assert!(
+        composed.contains(&fx.sentinel_of("model/1").to_string_lossy().into_owned()),
+        "the instruction should follow the task: {composed}"
+    );
+}
+
+/// TEST-054 — REQ-013.c. Scope-invariant.
+#[test]
+fn test_054_leaves_the_callers_task_file_alone() {
+    let fx = Fx::new();
+    let task = fx.raw_file("task.md", "Do the thing.\n");
+    let before = fs::read(&task).unwrap();
+    let drv = fx.script("quick", "echo 0 > \"$CIRCUS_SENTINEL\"\nsleep 30\n");
+
+    fx.circus(&[
+        "spawn",
+        "--task",
+        "model",
+        "--integration",
+        INTEGRATION,
+        "--task-file",
+        task.to_str().unwrap(),
+        "--",
+        drv.to_str().unwrap(),
+    ])
+    .ok();
+
+    assert_eq!(
+        fs::read(&task).unwrap(),
+        before,
+        "the task file was modified"
+    );
+    assert!(
+        !task.parent().unwrap().join("prompt").exists(),
+        "a prompt was written beside the caller's file"
+    );
+    assert!(
+        fx.attempt_dir("model/1").join("prompt").exists(),
+        "the composed prompt belongs in the attempt directory"
+    );
+}
+
+/// TEST-055 — REQ-013.d. Negative.
+#[test]
+fn test_055_keeps_a_prepared_attempt_when_the_launch_fails() {
+    let fx = Fx::new();
+    let task = fx.raw_file("task.md", "Do the thing.\n");
+
+    let r = fx.circus(&[
+        "spawn",
+        "--task",
+        "model",
+        "--integration",
+        INTEGRATION,
+        "--task-file",
+        task.to_str().unwrap(),
+        "--",
+        "circus-no-such-driver-xyzzy",
+    ]);
+
+    assert_ne!(r.code, 0, "a missing driver must not report success");
+    assert!(fx.record_exists("model/1"), "the record was removed");
+    assert!(
+        fx.worktree_of("model/1").exists(),
+        "the worktree was removed"
+    );
+    assert!(
+        fx.git(&["branch", "--list", "circus/model/1"])
+            .stdout
+            .contains("circus/model/1"),
+        "the branch was removed"
+    );
+    assert_eq!(fx.record("model/1")["state"], "prepared");
+}
+
 /// TEST-031 — NFR-001.b. Prohibited-action.
 #[test]
 fn test_031_never_deletes_attempt_state() {

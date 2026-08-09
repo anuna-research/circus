@@ -31,7 +31,19 @@ circus accept --attempt model/1 --verifier-record v.json --evidence theory:spec-
 circus merge --attempt model/1 --into main
 ```
 
-Watch a running attempt with `tmux attach -t circus-model-1`.
+Or all of steps 1–3 at once, with the prompt composed for you:
+
+```sh
+circus spawn --task model --integration main --task-file task.md -- circus-driver-codex
+```
+
+While an attempt runs, from any other terminal:
+
+```sh
+circus status --attempt model/1              # is it alive, how long, how far
+circus logs   --attempt model/1 -f --plain   # what the agent is saying
+tmux attach   -t circus-model-1              # watch it live, interactively
+```
 
 ## Usage
 
@@ -45,6 +57,9 @@ thing, writes the record back, and prints it.
 | `accept` | Records a decision from your verifier output and your evidence |
 | `merge` | Serialises one merge into the ref the attempt came from |
 | `instruction` | Prints the completion instruction a prompt needs |
+| `spawn` | `prepare` and `launch` in one, composing the prompt for you |
+| `status` | What is true of an attempt now, recorded and live |
+| `logs` | What the agent itself printed |
 
 Every command takes `-q`/`--quiet`, `-v`/`--verbose`, and `--no-color`.
 `circus merge` takes `-n`/`--dry-run`. stdout carries the run record as JSON and
@@ -125,7 +140,7 @@ Prerequisites: Rust 1.89 or later, Git, tmux, and
 [withdone](https://files.anuna.io/withdone/) on `PATH`.
 
 ```sh
-cargo test            # 173 tests: unit, spec suite, purity, traceability
+cargo test            # 201 tests: unit, spec suite, purity, traceability
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

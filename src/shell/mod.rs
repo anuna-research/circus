@@ -9,6 +9,7 @@ pub mod git;
 pub mod pane;
 pub mod proc;
 pub mod state;
+pub mod status;
 pub mod ui;
 
 use std::fmt;

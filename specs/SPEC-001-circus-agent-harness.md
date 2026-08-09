@@ -2,7 +2,7 @@
 id: SPEC-001
 title: Circus Agent Harness
 status: implemented
-version: 0.5.0
+version: 0.6.0
 last-updated: 2026-08-09
 implemented-date: 2026-08-09
 ---
@@ -192,15 +192,25 @@ Trace:
 - **REQ-003.b** — The sentinel path SHALL lie outside the attempt worktree.
 - **REQ-003.c** — Circus SHALL reject a prompt file that does not contain the
   attempt's sentinel path as a literal substring.
-- **REQ-003.d** — Circus SHALL pass the caller's prompt file to the driver
-  byte-for-byte. Circus SHALL NOT compose, edit, template, or inject prompt
-  content.
+- **REQ-003.d** — Circus SHALL pass the prompt file to the driver
+  byte-for-byte.
+- **REQ-003.e** — Circus SHALL NOT alter a prompt, template it, or add
+  provider-specific content to it.
 
-The instruction that tells the worker to write the sentinel only after
-asserting its evidence is authored by the lead, not by Circus. [[SPEC-001-circus-agent-harness#REQ-003]].c is the
-whole of Circus's involvement: it recognises one literal substring and treats
-every other byte as opaque. This division keeps
-[[SPEC-001-circus-agent-harness#REQ-007]].b intact.
+The task is authored by the lead, never by Circus, and
+[[SPEC-001-circus-agent-harness#REQ-003]].c is the whole of Circus's
+involvement with a prompt it is handed: it recognises one literal substring and
+treats every other byte as opaque.
+
+[[SPEC-001-circus-agent-harness#REQ-003]].e is narrower than "compose nothing",
+and the narrowing is deliberate.
+[[SPEC-001-circus-agent-harness#REQ-013]] joins a caller's task file to the
+attempt's completion instruction, which is composition. What
+[[SPEC-001-circus-agent-harness#REQ-003]].e forbids is the one thing that
+turns a harness into a prompt framework: knowledge of a provider, written into
+the prompt. The completion instruction is neither — it is provider-neutral, it is
+the same bytes `circus instruction` prints, and the joined result is preserved
+where anyone can read it. Circus still writes no word of the task.
 
 Trace:
 
@@ -208,7 +218,7 @@ Trace:
 - [[SPEC-001-circus-agent-harness#TEST-004]] (c — negative-input)
 - [[SPEC-001-circus-agent-harness#TEST-005]] (a — positive)
 - [[SPEC-001-circus-agent-harness#TEST-018]] (b — scope-invariant)
-- [[SPEC-001-circus-agent-harness#TEST-019]] (d — prohibited-action)
+- [[SPEC-001-circus-agent-harness#TEST-019]] (d, e — prohibited-action)
 - [[SPEC-001-circus-agent-harness#OBS-001]]
 
 ### REQ-004: Evidence Is the Acceptance Gate
@@ -406,7 +416,8 @@ Trace:
   instruction to stdout.
 - **REQ-010.b** — The instruction SHALL contain the attempt's sentinel path as
   a literal substring.
-- **REQ-010.c** — Circus SHALL NOT write the instruction into a prompt file.
+- **REQ-010.c** — Circus SHALL NOT write the instruction into a file the
+  caller supplied.
 
 The wording of that instruction is the one piece of knowledge every driver
 needs and none of them owns. It is not provider-specific: an agent that can run
@@ -415,9 +426,9 @@ undocumented means every operator rediscovers it, and the clause that matters
 most — that the sentinel is written when the work is *done*, not when the agent
 plans to finish — is the one most often left out.
 
-[[SPEC-001-circus-agent-harness#REQ-010]].c is what keeps
-[[SPEC-001-circus-agent-harness#REQ-003]].d intact. Circus prints the
-instruction; the operator decides whether to use it. Composition does the rest:
+[[SPEC-001-circus-agent-harness#REQ-010]].c keeps a caller's own files
+untouched. `circus instruction` prints; the operator decides whether to use it,
+and composition does the rest:
 
 ```sh
 { cat task.md; circus instruction --attempt model/1; } > prompt.md
@@ -433,6 +444,117 @@ Trace:
 - [[SPEC-001-circus-agent-harness#TEST-042]] (a, b — positive)
 - [[SPEC-001-circus-agent-harness#TEST-043]] (c — prohibited-action)
 - [[SPEC-001-circus-agent-harness#TEST-044]] (a — scope-invariant)
+
+### REQ-011: Attempt Inspection
+
+- **REQ-011.a** — `circus status` SHALL report, for an attempt, its recorded
+  state and whether its pane is alive.
+- **REQ-011.b** — WITH no attempt named, `circus status` SHALL report every
+  attempt in the repository.
+- **REQ-011.c** — Circus SHALL NOT modify an attempt while reporting on it.
+
+A run record describes what Circus last observed, and an attempt that is still
+running is exactly the case where that is not enough. The pane outlives the
+command that started it, so an interrupted `circus launch` leaves a record
+saying `prepared` beside an agent that is still working. Reading the record
+alone tells an operator the opposite of the truth.
+
+The live half is therefore observed at the moment of the query, not recalled:
+whether tmux still holds the pane, how long it ran so far, whether the
+sentinel appeared, and how far the task branch moved. None of it is
+written back, which is what
+[[SPEC-001-circus-agent-harness#REQ-011]].c fixes — an inspection that changes
+what it inspects is not one.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-009]]
+- [[SPEC-001-circus-agent-harness#TEST-045]] (a — positive)
+- [[SPEC-001-circus-agent-harness#TEST-046]] (a — positive, live)
+- [[SPEC-001-circus-agent-harness#TEST-047]] (b — positive)
+- [[SPEC-001-circus-agent-harness#TEST-048]] (c — prohibited-action, scope-invariant)
+- [[SPEC-001-circus-agent-harness#OBS-005]]
+
+### REQ-012: Agent Output
+
+- **REQ-012.a** — `circus logs` SHALL write an attempt's transcript to stdout.
+- **REQ-012.b** — WITH `--follow`, Circus SHALL keep writing until the attempt
+  stops running.
+- **REQ-012.c** — WITH `--plain`, Circus SHALL remove terminal control
+  sequences from what it writes.
+- **REQ-012.d** — Circus SHALL NOT modify the transcript.
+
+The transcript is what the agent actually said, and reading it is the most
+common thing an operator wants from a running attempt.
+[[SPEC-001-circus-agent-harness#REQ-011]] answers *whether* an attempt is
+alive; this answers *what it is doing*.
+
+`tmux attach` shows the same thing live, and it remains the better tool for a
+person who wants to watch. It is the wrong tool for the reader in
+[[users/lead-agent/user]], which is another agent: attaching takes over a
+terminal and returns nothing a program can consume.
+[[SPEC-001-circus-agent-harness#REQ-012]].a puts the same bytes on stdout.
+
+`--plain` exists because the transcript is a capture of a terminal, not of a
+pipe. It carries the colour, cursor movement, and redraws the agent emitted,
+which is faithful and unreadable in equal measure. Raw remains the default:
+those bytes are what happened, and a caller that pipes into `less -R` wants
+them intact.
+
+`--follow` stops on its own when the pane goes away, which is what
+distinguishes it from `tail -f`. A caller does not have to know when to stop
+reading.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-010]]
+- [[SPEC-001-circus-agent-harness#TEST-049]] (a — positive)
+- [[SPEC-001-circus-agent-harness#TEST-050]] (b — positive)
+- [[SPEC-001-circus-agent-harness#TEST-051]] (c — positive)
+- [[SPEC-001-circus-agent-harness#TEST-052]] (d — prohibited-action)
+
+### REQ-013: One-Step Spawn
+
+- **REQ-013.a** — `circus spawn` SHALL prepare an attempt and launch it under
+  one command.
+- **REQ-013.b** — `circus spawn` SHALL build the prompt from the caller's task
+  file followed by the attempt's completion instruction.
+- **REQ-013.c** — Circus SHALL write the composed prompt into the attempt
+  directory, and nowhere else.
+- **REQ-013.d** — WHEN preparation succeeds and the launch fails, Circus SHALL
+  leave the prepared attempt in place.
+
+`prepare` then `launch` is two commands because the step between them belongs
+to the operator: the sentinel path is only known once the attempt exists, so
+the prompt cannot be written before it. That ordering is real, and it is also
+the same three lines every time:
+
+```sh
+circus prepare --task model --integration main
+{ cat task.md; circus instruction --attempt model/1; } > prompt.md
+circus launch --attempt model/1 --prompt prompt.md -- circus-driver-codex
+```
+
+[[SPEC-001-circus-agent-harness#REQ-013]] performs exactly that, and nothing
+more. It is a shorthand rather than a new capability, which is why it composes
+the two contracts instead of restating them.
+
+[[SPEC-001-circus-agent-harness#REQ-013]].c is what keeps the shorthand honest.
+The composed prompt is written where every other artefact of the attempt lives,
+so an operator can read precisely what the agent was sent, and the caller's own
+task file is never touched.
+
+[[SPEC-001-circus-agent-harness#REQ-013]].d follows from
+[[SPEC-001-circus-agent-harness#NFR-001]].b. A launch that fails leaves a
+prepared attempt, not a rolled-back one — the worktree exists, and Circus does
+not delete attempts.
+
+Trace:
+
+- [[SPEC-001-circus-agent-harness#CON-011]]
+- [[SPEC-001-circus-agent-harness#TEST-053]] (a, b — positive)
+- [[SPEC-001-circus-agent-harness#TEST-054]] (c — scope-invariant)
+- [[SPEC-001-circus-agent-harness#TEST-055]] (d — negative)
 
 ### NFR-001: Recoverable Attempts
 
@@ -1020,6 +1142,159 @@ Verified by:
 - [[SPEC-001-circus-agent-harness#TEST-043]]
 - [[SPEC-001-circus-agent-harness#TEST-044]]
 
+### CON-009: Attempt Status
+
+Interface: `circus status [--attempt ATTEMPT]`.
+
+Input grammar:
+
+```abnf
+ATTEMPT = attempt-id
+```
+
+Pre-conditions:
+
+- WHEN `ATTEMPT` is supplied, it is recognised in full and a run record exists
+  for it.
+
+Post-conditions:
+
+- Circus writes a JSON status document to stdout.
+- WITH `--attempt`, the document is one object. WITHOUT it, the document is an
+  array of them, ordered by task then attempt number.
+- Each object carries the attempt's run record under `attempt`, unchanged and
+  still conforming to [[SPEC-001-circus-agent-harness#CON-007]], and the
+  observations below under `live`.
+- Circus creates, modifies, and deletes nothing.
+
+```json
+{
+  "attempt": { "schema_version": 1, "…": "the CON-007 record" },
+  "live": {
+    "pane": "circus-model-1",
+    "pane_alive": true,
+    "running_for_seconds": 412,
+    "sentinel_present": false,
+    "worktree_present": true,
+    "worktree_dirty": true,
+    "commits_ahead": 2,
+    "transcript_bytes": 18342
+  }
+}
+```
+
+`running_for_seconds` is null unless the attempt was launched and has not
+completed. `commits_ahead` counts the task branch over the recorded
+integration ref, and is null when either is missing.
+
+Error model:
+
+- An unrecognised `ATTEMPT` returns exit 64.
+- A missing record for a named `ATTEMPT` returns exit 64.
+- A record that fails schema recognition returns exit 65.
+- A repository with no attempts returns exit 0 and an empty array.
+
+Implements:
+
+- [[SPEC-001-circus-agent-harness#REQ-011]]
+
+Verified by:
+
+- [[SPEC-001-circus-agent-harness#TEST-045]]
+- [[SPEC-001-circus-agent-harness#TEST-046]]
+- [[SPEC-001-circus-agent-harness#TEST-047]]
+- [[SPEC-001-circus-agent-harness#TEST-048]]
+
+### CON-010: Agent Transcript
+
+Interface: `circus logs --attempt ATTEMPT [--follow] [--plain]`.
+
+Input grammar:
+
+```abnf
+ATTEMPT = attempt-id
+```
+
+Pre-conditions:
+
+- `ATTEMPT` is recognised in full and a run record exists for it.
+
+Post-conditions:
+
+- Circus writes the transcript to stdout, byte for byte, unless `--plain` is
+  given.
+- WITH `--plain`, Circus removes ANSI control sequences and carriage returns
+  and writes the remaining bytes.
+- WITH `--follow`, Circus keeps writing appended bytes until the attempt's pane
+  is gone and no more output arrives.
+- Circus does not modify, truncate, or remove the transcript.
+
+Error model:
+
+- An unrecognised `ATTEMPT` returns exit 64.
+- A missing record returns exit 64.
+- An attempt with no transcript yet returns exit 0 and writes nothing. A
+  prepared attempt has produced no output, which is an answer rather than a
+  fault.
+
+Implements:
+
+- [[SPEC-001-circus-agent-harness#REQ-012]]
+
+Verified by:
+
+- [[SPEC-001-circus-agent-harness#TEST-049]]
+- [[SPEC-001-circus-agent-harness#TEST-050]]
+- [[SPEC-001-circus-agent-harness#TEST-051]]
+- [[SPEC-001-circus-agent-harness#TEST-052]]
+
+### CON-011: Spawn
+
+Interface: `circus spawn --task TASK --integration REF --task-file FILE
+[--attempt N] -- DRIVER [ARGS...]`.
+
+Input grammar: as [[SPEC-001-circus-agent-harness#CON-001]] for `TASK`, `REF`,
+and `N`, and as [[SPEC-001-circus-agent-harness#CON-002]] for `DRIVER` and
+`ARGS`.
+
+```abnf
+FILE = abs-path / "-"          ; "-" reads the task from stdin
+```
+
+Pre-conditions:
+
+- Every pre-condition of [[SPEC-001-circus-agent-harness#CON-001]].
+- `FILE` is readable, or is `-` and stdin is readable.
+
+Post-conditions:
+
+- Circus performs [[SPEC-001-circus-agent-harness#CON-001]], then writes
+  `<attempt-dir>/prompt` as the task bytes followed by the attempt's completion
+  instruction, then performs
+  [[SPEC-001-circus-agent-harness#CON-002]] against that file.
+- The run record is the one
+  [[SPEC-001-circus-agent-harness#CON-002]] produces.
+- Circus does not modify `FILE`.
+
+Error model:
+
+- A preparation failure returns the code
+  [[SPEC-001-circus-agent-harness#CON-001]] assigns it, and nothing is
+  launched.
+- A launch failure returns the code
+  [[SPEC-001-circus-agent-harness#CON-002]] assigns it. The prepared attempt
+  remains, and its record names the composed prompt.
+
+Implements:
+
+- [[SPEC-001-circus-agent-harness#REQ-013]]
+
+Verified by:
+
+- [[SPEC-001-circus-agent-harness#TEST-053]]
+- [[SPEC-001-circus-agent-harness#TEST-054]]
+- [[SPEC-001-circus-agent-harness#TEST-055]]
+
 ## Architecture Decisions
 
 ### ADR-001: Compose Existing Unix Programs
@@ -1546,6 +1821,7 @@ untracked sentinel file.
 ### TEST-019: Pass the Prompt Through Unchanged
 
 Validates: [[SPEC-001-circus-agent-harness#REQ-003]].d,
+[[SPEC-001-circus-agent-harness#REQ-003]].e,
 [[SPEC-001-circus-agent-harness#REQ-007]].b — prohibited-action
 
 Given a prompt file with known bytes, the lead launches a fixture driver that
@@ -1758,6 +2034,95 @@ Validates: [[SPEC-001-circus-agent-harness#REQ-010]].a — scope-invariant
 Stdout from `circus instruction` does not parse as a run record, and carries no
 message. The attempt's own record is unchanged.
 
+### TEST-045: Report a Recorded Attempt
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-011]].a — positive
+
+Given a prepared attempt, the lead runs `circus status --attempt`. Stdout
+carries one object whose `attempt` is the attempt's record and whose `live`
+reports the pane absent.
+
+### TEST-046: Report an Attempt That Is Still Running
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-011]].a — positive
+
+Given a launch still in progress, the lead runs `circus status --attempt` from
+another process. `live.pane_alive` is true and `live.running_for_seconds` is a
+number, while the record still reads `prepared`.
+
+### TEST-047: Report Every Attempt
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-011]].b — positive
+
+Given three attempts across two tasks, the lead runs `circus status`. Stdout
+carries an array of three objects, ordered by task then attempt number. A
+repository with no attempts yields an empty array.
+
+### TEST-048: Report Without Touching
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-011]].c — prohibited-action,
+scope-invariant
+
+Given a prepared attempt, the lead runs `circus status` in both forms. Every
+file under the state root is byte-identical afterwards, the worktree is
+unchanged, and no ref moved.
+
+### TEST-049: Write the Transcript
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-012]].a — positive
+
+Given a completed attempt whose driver printed to both streams, the lead runs
+`circus logs`. Stdout carries both lines. A prepared attempt yields empty
+stdout and exit 0.
+
+### TEST-050: Follow a Running Attempt
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-012]].b — positive
+
+Given a driver that prints, waits, and prints again, the lead runs
+`circus logs --follow` alongside it. Both lines arrive, and the command returns
+on its own once the attempt stops.
+
+### TEST-051: Strip Terminal Control Sequences
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-012]].c — positive
+
+Given a driver that emits colour and a carriage return, `circus logs --plain`
+writes the text with no escape byte in it. The same command without `--plain`
+writes the escapes.
+
+### TEST-052: Read Without Writing
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-012]].d — prohibited-action
+
+Given a completed attempt, the lead runs `circus logs` in every form. The
+transcript is byte-identical afterwards, and the run record is unchanged.
+
+### TEST-053: Prepare and Launch Under One Command
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-013]].a,
+[[SPEC-001-circus-agent-harness#REQ-013]].b — positive
+
+Given a task file and a driver that writes the sentinel, the lead runs
+`circus spawn`. One worktree and one branch exist, the attempt reaches
+`completed` by sentinel, and the composed prompt holds the task text followed
+by the sentinel path. The same works with the task on stdin.
+
+### TEST-054: Leave the Caller's Task File Alone
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-013]].c — scope-invariant
+
+Given a task file, the lead spawns an attempt. The task file is byte-identical
+afterwards, and the composed prompt exists only inside the attempt directory.
+
+### TEST-055: Keep a Prepared Attempt When the Launch Fails
+
+Validates: [[SPEC-001-circus-agent-harness#REQ-013]].d — negative
+
+Given a driver that is not executable, the lead spawns an attempt. The command
+exits non-zero, and the worktree, branch, and record of the prepared attempt
+all remain.
+
 ## Observability
 
 ### OBS-001: Attempt Lifecycle Record
@@ -1784,6 +2149,13 @@ The run record's `external_programs` array records every external program
 Circus executed for the attempt, with its resolved path and exit status. It is
 the artefact [[SPEC-001-circus-agent-harness#TEST-011]] checks the
 [[SPEC-001-circus-agent-harness#REQ-006]].c prohibition against.
+
+### OBS-005: Live Attempt Observation
+
+The status document's `live` object records what was true of an attempt at the
+moment it was queried: whether tmux still holds the pane, how long it ran so far, whether the
+sentinel appeared, and how far the task branch moved. Unlike every other signal here it is not written to the run record,
+because it describes the present rather than a transition.
 
 ## Quality Gates
 
@@ -1869,7 +2241,7 @@ gates:
   - gate: "Every TEST entry implemented and green"
     mechanism: "cargo test"
     result: pass
-    evidence: "2026-08-09 — 173 passed, 0 failed across 6 suites in 31s: 117 unit, 44 spec (TEST-001..044), 3 purity, 9 traceability"
+    evidence: "2026-08-09 — 201 passed, 0 failed across 6 suites in 40s: 134 unit, 55 spec (TEST-001..055), 3 purity, 9 traceability"
   - gate: "A full-screen agent runs under a driver"
     mechanism: "manual: circus launch -- circus-driver-claude-tui against Claude Code 2.1.226"
     result: fail
@@ -1946,7 +2318,25 @@ record a validated design.
 ## Changelog
 
 <details>
-<summary>Revision history — 0.1.0 → 0.5.0</summary>
+<summary>Revision history — 0.1.0 → 0.6.0</summary>
+
+- 0.6.0 — normative. Added three commands and the requirements behind them.
+  [[SPEC-001-circus-agent-harness#REQ-011]] and
+  [[SPEC-001-circus-agent-harness#CON-009]] give `circus status`, which reports
+  an attempt as recorded *and* as observed, because a running attempt's record
+  says `prepared` while an agent is working.
+  [[SPEC-001-circus-agent-harness#REQ-012]] and
+  [[SPEC-001-circus-agent-harness#CON-010]] give `circus logs`, which puts what
+  the agent printed on stdout — `tmux attach` shows the same bytes but returns
+  nothing a program can read.
+  [[SPEC-001-circus-agent-harness#REQ-013]] and
+  [[SPEC-001-circus-agent-harness#CON-011]] give `circus spawn`.
+  [[SPEC-001-circus-agent-harness#REQ-003]].d was split, and its prohibition
+  narrowed to provider-specific content, so that spawn's composition of task
+  plus completion instruction is permitted while a prompt framework still is
+  not. `launch` now writes the run record before it waits, which is what makes
+  a running attempt answerable at all. Added
+  [[SPEC-001-circus-agent-harness#OBS-005]] and seven tests.
 
 - 0.5.0 — normative. Added [[SPEC-001-circus-agent-harness#REQ-010]] and
   [[SPEC-001-circus-agent-harness#CON-008]] for `circus instruction`, so the
