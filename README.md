@@ -138,7 +138,16 @@ source; the reference pages restate them for a reader at work.
 
 Prerequisites: Rust 1.89 or later, Git, tmux, and
 [withdone](https://git.anuna.io/anuna-research/withdone) on `PATH`.
-withdone is a single POSIX shell script; drop it anywhere on your `PATH`.
+
+withdone is a single POSIX shell script with no dependencies beyond the POSIX
+baseline, so installing it is a download:
+
+```sh
+curl -fsSL https://git.anuna.io/anuna-research/withdone/raw/branch/main/withdone \
+    -o ~/.local/bin/withdone && chmod +x ~/.local/bin/withdone
+```
+
+`withdone --version` prints `withdone 3.0.0`.
 
 ```sh
 cargo test            # 201 tests: unit, spec suite, purity, traceability

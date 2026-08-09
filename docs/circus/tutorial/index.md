@@ -20,6 +20,13 @@ You need Git, tmux, withdone, and Circus on your `PATH`. Check them:
 git --version && tmux -V && withdone --version && circus --version
 ```
 
+WHEN `withdone` is missing, install it. It is one POSIX shell script:
+
+```sh
+curl -fsSL https://git.anuna.io/anuna-research/withdone/raw/branch/main/withdone \
+    -o ~/.local/bin/withdone && chmod +x ~/.local/bin/withdone
+```
+
 Work in a scratch repository, not one you care about:
 
 ```sh

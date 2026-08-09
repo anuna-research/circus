@@ -84,6 +84,14 @@ ls "$(git rev-parse --git-common-dir)/circus/model"
 
 ## When the launch itself failed
 
+WHEN `circus launch` exits 127, a program circus composes is not on `PATH`,
+and the message names it. Install it and launch the same attempt again:
+
+```sh
+curl -fsSL https://git.anuna.io/anuna-research/withdone/raw/branch/main/withdone \
+    -o ~/.local/bin/withdone && chmod +x ~/.local/bin/withdone
+```
+
 WHEN `circus launch` exits 70, tmux or withdone failed before the attempt
 began. The message names what went wrong. One cause worth knowing: tmux keeps
 its socket under `TMUX_TMPDIR`, and a deep value there exceeds the platform's
