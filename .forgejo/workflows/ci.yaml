@@ -53,6 +53,11 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A hang and a slow runner are indistinguishable from the outside, and this
+    # instance serves no logs, so an unbounded job is a run nobody can read.
+    # The suite takes ~40s locally; 25 minutes is generous for a cold build on
+    # a shared runner and still bounds a genuine hang.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -165,8 +170,13 @@ jobs:
             ${{ runner.os }}-cargo-circus-ci-v1-
 
       - name: Test
-        # ~15 of the 55 spec tests start a tmux pane; each isolates its server
-        # through TMUX_TMPDIR, so they do not collide.
+        # ~15 of the 55 spec tests start a tmux pane. Each fixture sets its own
+        # TMUX_TMPDIR inside its temporary directory, so they get one server
+        # each and cannot collide.
+        #
+        # Bounded separately from the job: if the suite is what hangs, the
+        # diagnostic step still gets to run and say so.
+        timeout-minutes: 15
         run: |
           echo "MARKER: test" >> /tmp/circus-ci.log
           set -o pipefail

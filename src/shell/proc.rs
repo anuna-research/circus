@@ -174,16 +174,42 @@ fn is_executable(p: &Path) -> bool {
 /// `#OBS-003` states this as a count rather than a flag, so it is measured by
 /// enumeration. `ps` is the platform's own answer to the question and is
 /// invoked through the same recorded path as everything else.
+///
+/// The selection is done here rather than by `ps -g`, because that flag does
+/// not mean the same thing twice. BSD and macOS read it as "processes whose
+/// process group leader is in this list"; Linux procps reads it as "select by
+/// session **or** by effective group name". Circus asked for a process group
+/// and Linux answered about sessions, which reported residue for a group that
+/// had been reaped and failed every attempt in CI while passing on the
+/// developer's machine.
+///
+/// `ps -A -o pid=,pgid=` is POSIX and means one thing everywhere. Filtering it
+/// costs a few lines of output and removes a platform divergence from a
+/// control: `#NFR-002.c` fails an attempt on a non-zero count.
 pub fn process_group_residue(inv: &mut Invoker, pgid: i32) -> u32 {
-    let Ok(out) = inv.run("ps", &["-o", "pid=", "-g", &pgid.to_string()]) else {
+    let Ok(out) = inv.run("ps", &["-A", "-o", "pid=,pgid="]) else {
         // `ps` absent or failed: report no residue rather than invent one. The
         // caller treats an unmeasurable group as clean, which is the same
         // answer the OS gives when the group is genuinely empty.
         return 0;
     };
-    String::from_utf8_lossy(&out.stdout)
+    count_in_group(&String::from_utf8_lossy(&out.stdout), pgid)
+}
+
+/// Count the rows of a `ps -A -o pid=,pgid=` listing whose group matches.
+///
+/// Split out from the `ps` call so it can be tested against a fixed listing.
+/// Testing it against a live one cannot work: two snapshots taken moments
+/// apart disagree, because processes come and go between them.
+pub fn count_in_group(listing: &str, pgid: i32) -> u32 {
+    listing
         .lines()
-        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let _pid: i32 = f.next()?.parse().ok()?;
+            let group: i32 = f.next()?.parse().ok()?;
+            (group == pgid).then_some(())
+        })
         .count() as u32
 }
 
@@ -275,5 +301,41 @@ mod tests {
                 "this process is in its own group, so the count cannot be zero"
             );
         }
+    }
+
+    #[test]
+    fn counts_only_rows_whose_group_matches() {
+        // The divergence that failed CI while passing locally: `ps -g` selects
+        // by process group on BSD and by session on Linux. Circus now selects
+        // for itself, so the rule is fixed here rather than by the platform.
+        let listing = "\
+  101   101
+  102   101
+  103   999
+  104   101
+  105   200
+";
+        assert_eq!(count_in_group(listing, 101), 3);
+        assert_eq!(count_in_group(listing, 999), 1);
+        assert_eq!(count_in_group(listing, 200), 1);
+        assert_eq!(count_in_group(listing, 42), 0, "an absent group is zero");
+    }
+
+    #[test]
+    fn tolerates_the_shapes_ps_actually_emits() {
+        // Leading whitespace, right-aligned columns, a blank trailing line,
+        // and a stray header row if a platform emits one anyway.
+        assert_eq!(count_in_group("", 1), 0);
+        assert_eq!(count_in_group("\n\n", 1), 0);
+        assert_eq!(count_in_group("  PID  PGID\n 7 7\n", 7), 1);
+        assert_eq!(count_in_group("7 7\n8 7\n", 7), 2);
+        assert_eq!(count_in_group("   7    7   \n", 7), 1);
+        // A row that is not two integers is skipped, not counted.
+        assert_eq!(count_in_group("nonsense\n7 7\n", 7), 1);
+        assert_eq!(
+            count_in_group("7\n", 7),
+            0,
+            "a row with no group is not a member"
+        );
     }
 }
