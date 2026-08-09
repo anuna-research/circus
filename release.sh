@@ -68,6 +68,20 @@ for prog in git tmux withdone; do
     || error "\`$prog\` is not on PATH. The test suite drives it for real; install it and re-run."
 done
 
+# The gate runs after the version bump, because the bump is part of what is
+# being gated. A failure therefore leaves Cargo.toml edited and Cargo.lock
+# possibly refreshed, which is a dirty tree the next run refuses to start from.
+# Restore both unless we get all the way to the commit.
+RELEASE_COMMITTED=0
+_restore_on_failure() {
+  [[ "$RELEASE_COMMITTED" == "1" ]] && return 0
+  if ! git diff --quiet -- Cargo.toml Cargo.lock 2>/dev/null; then
+    warn "Restoring Cargo.toml and Cargo.lock; the release did not complete."
+    git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true
+  fi
+}
+trap _restore_on_failure EXIT INT TERM
+
 info "Updating version in Cargo.toml..."
 if [[ "$(uname)" == "Darwin" ]]; then
   sed -i '' "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
@@ -75,6 +89,9 @@ else
   sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
 fi
 
+# Run the suite exactly as it will be run by hand — from this terminal, with
+# stderr attached to it. A test that reads `is_terminal()` behaves differently
+# through a pipe, and one of them did: it passed in CI and failed here.
 info "Running tests (real git, tmux, and withdone; takes ~40s)..."
 cargo test --quiet
 
@@ -111,6 +128,8 @@ info "Committing version bump..."
 # `cargo test` above refreshes circus's own version in Cargo.lock.
 git add Cargo.toml Cargo.lock
 git commit -m "chore: release $TAG"
+
+RELEASE_COMMITTED=1
 
 info "Creating tag $TAG..."
 git tag -a "$TAG" -m "Release $VERSION"

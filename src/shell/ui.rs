@@ -39,12 +39,33 @@ const RESET: &str = "\x1b[0m";
 /// Return to column zero and clear the line.
 const CLEAR: &str = "\r\x1b[2K";
 
+/// Whether stderr should be styled — `ADR-008`, as a decision rather than an
+/// observation.
+///
+/// Separated from [`Ui::new`] because the observation is what makes a test of
+/// it environment-dependent. `cargo test` captures `eprintln!` through a print
+/// hook but does not replace file descriptor 2, so `is_terminal()` reports the
+/// developer's actual terminal: the same assertion passes through a pipe and
+/// fails from a tty. The inputs are the contract; reading them is not.
+fn should_style(terminal: bool, no_color: bool, env_suppressed: bool) -> bool {
+    terminal && !no_color && !env_suppressed
+}
+
 impl Ui {
     pub fn new(level: Level, no_color: bool) -> Self {
-        let terminal = std::io::stderr().is_terminal();
+        Self::with_terminal(
+            level,
+            no_color,
+            std::io::stderr().is_terminal(),
+            color_suppressed_by_environment(),
+        )
+    }
+
+    /// [`Ui::new`] with the environment supplied rather than read.
+    fn with_terminal(level: Level, no_color: bool, terminal: bool, env_suppressed: bool) -> Self {
         Self {
             level,
-            style: terminal && !no_color && !color_suppressed_by_environment(),
+            style: should_style(terminal, no_color, env_suppressed),
             terminal,
         }
     }
@@ -223,16 +244,67 @@ mod tests {
     }
 
     #[test]
-    fn styling_is_off_when_stderr_is_not_a_terminal() {
-        // ADR-008. Under `cargo test` stderr is captured, so this is the
-        // real code path rather than a simulated one.
-        let ui = Ui::new(Level::Normal, false);
-        assert!(!ui.style, "captured stderr must never be styled");
+    fn styling_needs_a_terminal_and_nothing_objecting() {
+        // ADR-008, exhaustively. Every input is supplied, so the result does
+        // not depend on whether the suite was run from a terminal or a pipe —
+        // which is exactly what an earlier version of this test got wrong.
+        for terminal in [false, true] {
+            for no_color in [false, true] {
+                for env_suppressed in [false, true] {
+                    let want = terminal && !no_color && !env_suppressed;
+                    let ui = Ui::with_terminal(Level::Normal, no_color, terminal, env_suppressed);
+                    assert_eq!(
+                        ui.style, want,
+                        "terminal={terminal} no_color={no_color} env={env_suppressed}"
+                    );
+                    assert_eq!(
+                        ui.is_terminal(),
+                        terminal,
+                        "terminal-ness is reported as given"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn no_color_flag_wins_over_everything() {
-        assert!(!Ui::new(Level::Normal, true).style);
+    fn a_pipe_is_never_styled_however_the_flags_are_set() {
+        for no_color in [false, true] {
+            for env_suppressed in [false, true] {
+                assert!(!Ui::with_terminal(Level::Normal, no_color, false, env_suppressed).style);
+            }
+        }
+    }
+
+    #[test]
+    fn either_objection_alone_suppresses_a_terminal() {
+        assert!(
+            !Ui::with_terminal(Level::Normal, true, true, false).style,
+            "--no-color"
+        );
+        assert!(
+            !Ui::with_terminal(Level::Normal, false, true, true).style,
+            "NO_COLOR or TERM"
+        );
+        assert!(
+            Ui::with_terminal(Level::Normal, false, true, false).style,
+            "neither"
+        );
+    }
+
+    #[test]
+    fn the_real_constructor_agrees_with_the_decision_it_delegates_to() {
+        // Ui::new reads the environment; whatever it read, the result must be
+        // the same as feeding those readings to should_style. This holds from
+        // a terminal and from a pipe.
+        let observed_terminal = std::io::stderr().is_terminal();
+        let observed_env = color_suppressed_by_environment();
+        for no_color in [false, true] {
+            assert_eq!(
+                Ui::new(Level::Normal, no_color).style,
+                should_style(observed_terminal, no_color, observed_env)
+            );
+        }
     }
 
     #[test]
