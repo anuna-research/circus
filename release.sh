@@ -112,7 +112,13 @@ cargo metadata --locked --format-version 1 >/dev/null \
 for required in scripts/install.sh .forgejo/workflows/release.yaml; do
   [[ -f "$required" ]] || error "$required is missing; the release pipeline needs it."
 done
-[[ -n "$(echo drivers/circus-driver-*)" ]] || warn "No drivers found to publish."
+# `echo` on an unmatched glob prints the pattern, so the obvious
+# `[[ -n "$(echo drivers/circus-driver-*)" ]]` is true whether or not a single
+# driver exists. Let the shell drop the unmatched pattern instead.
+shopt -s nullglob
+_drivers=(drivers/circus-driver-*)
+shopt -u nullglob
+[[ ${#_drivers[@]} -gt 0 ]] || warn "No drivers found to publish."
 
 # Specification hygiene, when the tooling is present. Not fatal: a clone
 # without zetl can still cut a release.
@@ -127,7 +133,20 @@ fi
 info "Committing version bump..."
 # `cargo test` above refreshes circus's own version in Cargo.lock.
 git add Cargo.toml Cargo.lock
-git commit -m "chore: release $TAG"
+
+# The bump is a no-op when Cargo.toml already reads $VERSION, which is exactly
+# the case for a first release: 0.1.0 sat in Cargo.toml from the day the crate
+# was created. `git commit` exits 1 on an empty index, and `set -e` turned that
+# into the script dying one line before the tag — every gate green, nothing
+# tagged, no explanation beyond "nothing to commit".
+#
+# A release is a tag, not a commit. Nothing to commit is a fact about the tree,
+# not a reason to stop.
+if git diff --cached --quiet; then
+  info "Cargo.toml already reads $VERSION; tagging the current commit."
+else
+  git commit -m "chore: release $TAG"
+fi
 
 RELEASE_COMMITTED=1
 
@@ -142,6 +161,7 @@ echo ""
 info "Release $TAG published!"
 echo ""
 echo "Forgejo Actions release pipeline triggered (.forgejo/workflows/release.yaml)."
+echo "Watch it at: https://git.anuna.io/anuna-research/circus/actions"
 echo "When it finishes, the release will be available at:"
 echo "  https://files.anuna.io/circus/            (latest)"
 echo "  https://files.anuna.io/circus/$TAG/"
