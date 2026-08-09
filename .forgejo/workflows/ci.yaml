@@ -211,6 +211,20 @@ jobs:
           set -o pipefail
           cargo test --locked --test purity --test traceability 2>&1 | tee -a /tmp/circus-ci.log
 
+      # The whole log, not the 240 characters a commit status holds. The
+      # description below is for reading at a glance; this is for the times
+      # that is not enough, and it is the difference between one round trip
+      # and five. Runs on failure only — a green run's log teaches nothing.
+      - name: Keep the log
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: circus-ci-log
+          path: /tmp/circus-ci.log
+          retention-days: 14
+          if-no-files-found: warn
+
       # This Forgejo exposes no log endpoint, so a failure is visible only as
       # "Failing after Nm", which is not enough to fix anything. Commit statuses
       # ARE readable through the API, so the first error line goes into one.
@@ -232,14 +246,27 @@ jobs:
           set +e
           where=$(grep -E '^MARKER: ' /tmp/circus-ci.log 2>/dev/null | tail -1 | sed 's/^MARKER: //')
           [ -n "$where" ] || where="before the first step wrote a marker"
-          # The panic line names the test; the line under it says why. Both
-          # matter and neither alone is enough, so take the test name from one
-          # and the detail from the other.
-          which=$(grep -m1 -oE "thread '[^']+'" /tmp/circus-ci.log 2>/dev/null | tr -d "thread '" )
+          # Every failed test, not just the first. A suite that fails in ten
+          # places and reports one costs ten round trips at nine minutes each,
+          # which is how the last three of these were spent. cargo prints the
+          # bare list under a final `failures:` heading; take the last such
+          # block, since the first one carries the panic output too.
+          which=$(awk '
+              /^failures:$/  { names = ""; inblk = 1; next }
+              inblk && /^    [A-Za-z0-9_:]+$/ { names = names " " $1; next }
+              inblk          { inblk = 0; if (names != "") last = names }
+              END            { if (inblk && names != "") last = names; print last }
+          ' /tmp/circus-ci.log 2>/dev/null)
+          # `tr -d` takes a SET of characters, so the obvious `tr -d "thread '"`
+          # deletes every t, h, r, e, a and d in the name. It turned
+          # test_006_rejects_a_transport_only_outcome into s_006_jcs__nspo_only_oucom.
+          [ -n "$which" ] || which=$(grep -m1 -oE "thread '[^']+'" /tmp/circus-ci.log 2>/dev/null \
+                                     | sed "s/^thread '//; s/'\$//")
+          tally=$(grep -m1 -oE '[0-9]+ passed; [0-9]+ failed' /tmp/circus-ci.log 2>/dev/null)
           detail=$(grep -m1 -E "^(\`|launch exited|assertion|left:|error|E:|.*: command not found|.*No such file)" /tmp/circus-ci.log 2>/dev/null)
           [ -n "$detail" ] || detail=$(grep -m1 -A2 -E 'panicked at' /tmp/circus-ci.log 2>/dev/null | tail -n1)
           [ -n "$detail" ] || detail=$(tail -n 2 /tmp/circus-ci.log 2>/dev/null | tr '\n' ' ')
-          line="${which:+[$which] }$detail"
+          line="${tally:+($tally) }${which:+[$which ] }$detail"
           [ -n "$line" ] || line="no output captured"
           desc=$(printf 'died in [%s]: %s' "$where" "$line" \
                  | tr -d '"\\' | tr '\n\r\t' '   ' | cut -c1-240)
