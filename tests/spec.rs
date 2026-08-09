@@ -194,7 +194,7 @@ fn test_003_starts_a_named_tmux_pane() {
     let sentinel = fx.sentinel_of(&id);
     let drv = fx.script("slow", "sleep 60\n");
 
-    let mut child = fx.circus_spawn(&[
+    let child = fx.circus_spawn(&[
         "launch",
         "--attempt",
         &id,
@@ -223,10 +223,24 @@ fn test_003_starts_a_named_tmux_pane() {
     assert!(pane.contains('1'), "pane name lacks the attempt: {pane}");
 
     fs::write(&sentinel, "0\n").unwrap();
-    let out = child.wait().unwrap();
+    // Report the code and stderr, not just the fact of failure. This assertion
+    // failed twice in CI and passed locally, and "launch should finish" said
+    // nothing about which of exit 1 (residue), 70 (no outcome recorded), or
+    // something else it was.
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let said = stderr
+        .lines()
+        .rfind(|l| l.contains("circus:"))
+        .unwrap_or("(circus said nothing)");
+    let rec = fx.record(&id);
     assert!(
-        out.success(),
-        "launch should finish once the sentinel is written"
+        out.status.success(),
+        "launch exited {:?} | {said} | state={} residue={} method={}",
+        out.status.code(),
+        rec["state"],
+        rec["process_group_residue"],
+        rec["completion_method"],
     );
 }
 

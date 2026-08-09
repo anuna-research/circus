@@ -226,7 +226,10 @@ jobs:
           set +e
           where=$(grep -E '^MARKER: ' /tmp/circus-ci.log 2>/dev/null | tail -1 | sed 's/^MARKER: //')
           [ -n "$where" ] || where="before the first step wrote a marker"
-          line=$(grep -m1 -E '^(error|E:|thread .* panicked|.*: command not found|.*No such file)' /tmp/circus-ci.log 2>/dev/null)
+          # An assertion message says more than the panic line above it, and
+          # the 240-character budget only fits one of them. Prefer the detail.
+          line=$(grep -m1 -E '^(launch exited|assertion|left:|error|E:|.*: command not found|.*No such file)' /tmp/circus-ci.log 2>/dev/null)
+          [ -n "$line" ] || line=$(grep -m1 -E 'thread .* panicked' /tmp/circus-ci.log 2>/dev/null)
           [ -n "$line" ] || line=$(tail -n 2 /tmp/circus-ci.log 2>/dev/null | tr '\n' ' ')
           [ -n "$line" ] || line="no output captured"
           desc=$(printf 'died in [%s]: %s' "$where" "$line" \
