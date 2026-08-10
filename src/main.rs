@@ -47,6 +47,9 @@ Examples:
   # Record your own verdict. Circus never forms one.
   circus accept --attempt model/1 --verifier-record v.json --evidence theory:q42
 
+  # Or merge as part of the same run, once accepted.
+  circus accept --attempt model/1 --verifier-record v.json --evidence theory:q42 --auto-merge
+
   # What has already been tried on this task, for the next prompt.
   circus history --task model
 
@@ -127,6 +130,30 @@ enum Command {
         /// Attempt number. Allocated automatically when omitted.
         #[arg(long)]
         attempt: Option<String>,
+        /// After the driver finishes, run this as the verifier and — if it
+        /// exits 0 — accept with the given `--evidence` and merge, all in
+        /// this one run. The verifier's exit code decides accept/reject
+        /// exactly as it would from a `circus accept --verifier-record` a
+        /// caller built by hand; Circus is just the one running it here.
+        /// Requires `--evidence`.
+        #[arg(long, num_args = 1..)]
+        verifier: Vec<String>,
+        /// Evidence for `--auto-merge`'s verifier run. Same shape and
+        /// meaning as `accept --evidence`.
+        #[arg(long, num_args = 1..)]
+        evidence: Vec<String>,
+        /// After the driver finishes, run `--verifier` and merge only if it
+        /// exits 0. Requires `--verifier` and `--evidence`.
+        #[arg(long, conflicts_with = "force_merge")]
+        auto_merge: bool,
+        /// Merge the moment the driver process exits 0 — no verifier, no
+        /// evidence, no independent check at all. Named for what it is: an
+        /// explicit bypass of the separation `#REQ-004.b` otherwise keeps
+        /// between "the driver stopped" and "the work is good". For a
+        /// caller who has already decided that gate does not apply here,
+        /// not a shortcut to reach for by default.
+        #[arg(long, conflicts_with = "auto_merge")]
+        force_merge: bool,
         /// The driver to run, and its arguments.
         #[arg(last = true, required = true)]
         driver: Vec<String>,
@@ -157,6 +184,14 @@ enum Command {
         /// never resolved.
         #[arg(long, required = true, num_args = 1..)]
         evidence: Vec<String>,
+        /// On acceptance, immediately merge into the ref the attempt was
+        /// prepared from — the same as running `circus merge` right after,
+        /// with one run record instead of two. A rejected attempt is never
+        /// merged, and a conflicting merge still reports `rejected`: this
+        /// changes nothing about when a merge is allowed to happen, only
+        /// whether a second command is needed to ask for it.
+        #[arg(long)]
+        auto_merge: bool,
     },
 
     /// Write an attempt's transcript — what the agent itself printed.
@@ -254,6 +289,10 @@ fn main() -> ExitCode {
             integration,
             task_file,
             attempt,
+            verifier,
+            evidence,
+            auto_merge,
+            force_merge,
             driver,
         } => spawn(
             &mut inv,
@@ -263,6 +302,10 @@ fn main() -> ExitCode {
             &task_file,
             attempt.as_deref(),
             &driver,
+            &verifier,
+            &evidence,
+            auto_merge,
+            force_merge,
         ),
         Command::Launch {
             attempt,
@@ -273,7 +316,15 @@ fn main() -> ExitCode {
             attempt,
             verifier_record,
             evidence,
-        } => accept(&mut inv, ui, &attempt, &verifier_record, &evidence),
+            auto_merge,
+        } => accept(
+            &mut inv,
+            ui,
+            &attempt,
+            &verifier_record,
+            &evidence,
+            auto_merge,
+        ),
         Command::Logs {
             attempt,
             follow,
@@ -429,7 +480,15 @@ fn spawn(
     task_file: &Path,
     attempt: Option<&str>,
     driver: &[String],
+    verifier: &[String],
+    evidence: &[String],
+    auto_merge: bool,
+    force_merge: bool,
 ) -> Result<i32> {
+    if auto_merge && (verifier.is_empty() || evidence.is_empty()) {
+        return Err(Error::usage("--auto-merge needs --verifier and --evidence"));
+    }
+
     // Read the task before preparing anything. A missing file is a usage
     // error, and finding that out after a worktree exists leaves an attempt
     // nobody asked for.
@@ -460,7 +519,102 @@ fn spawn(
 
     // A launch failure leaves the prepared attempt standing — `#REQ-013.d`,
     // which follows from NFR-001.b.
-    do_launch(inv, ui, &id, &paths, rec, &composed, driver)
+    let (mut rec, mut code) = do_launch(
+        inv,
+        ui,
+        &id,
+        &paths,
+        rec,
+        &composed,
+        driver,
+        auto_merge || force_merge,
+    )?;
+
+    // A failed transport (a process group that outlived the cleanup
+    // deadline) never merges, flag or no flag — that state already means
+    // something went wrong at the process level, before any question of
+    // whether the work itself is good.
+    if rec.state == State::Failed || !(auto_merge || force_merge) {
+        return finish(inv, &paths.record, rec, code);
+    }
+
+    let roots = state::discover_roots(inv, &cwd()?)?;
+
+    if force_merge {
+        match rec.transport_exit_code {
+            Some(0) => {
+                let into = rec.integration_ref.clone();
+                let cwd = cwd()?;
+                let report = apply_merge_to_record(inv, &roots, &cwd, &mut rec, &into)?;
+                if report.outcome == MergeOutcome::Conflict {
+                    ui.state(&format!(
+                        "{id} conflicted merging into `{into}` in {}",
+                        report.conflicts.join(", ")
+                    ));
+                    ui.hint(&format!(
+                        "`{into}` is unchanged and the attempt is untouched"
+                    ));
+                    ui.hint("see docs/circus/how-to/how-to-resolve-a-merge-conflict.md");
+                    code = exit::REJECTED;
+                } else {
+                    let short = report
+                        .commit
+                        .as_deref()
+                        .map_or("(unknown)", |c| c.get(..12).unwrap_or(c));
+                    ui.state(&format!("force-merged {id} into `{into}` as {short}"));
+                    ui.hint(
+                        "no verifier ran and no evidence was recorded — \
+                         --force-merge skips both",
+                    );
+                    code = exit::OK;
+                }
+            }
+            other => ui.hint(&format!(
+                "--force-merge skipped: the driver exited {}, not 0",
+                other.map_or("(none)".to_string(), |c| c.to_string())
+            )),
+        }
+        return finish(inv, &paths.record, rec, code);
+    }
+
+    // `--auto-merge`: run the caller's verifier here, in the worktree, and
+    // decide from its exit code — never from the driver's own. Otherwise
+    // this is exactly `accept --auto-merge`, with Circus as the one running
+    // the verifier instead of the caller.
+    let (verifier_program, verifier_args) = verifier
+        .split_first()
+        .expect("--auto-merge requires --verifier, checked above");
+    let output = inv.run_in(verifier_program, verifier_args, Some(&paths.worktree))?;
+    let mut captured = output.stdout.clone();
+    captured.extend_from_slice(&output.stderr);
+    let output_path = paths.attempt_dir.join("auto-verifier-output.raw");
+    std::fs::write(&output_path, &captured)?;
+
+    // Built as JSON and re-read through the one recogniser rather than the
+    // struct literal directly — `#REQ-005`-adjacent: a verifier record this
+    // process assembles is still a verifier record, and it should pass
+    // exactly the same validation as one a caller wrote by hand, not a
+    // second, unchecked path to the same fields.
+    let verifier_bytes = serde_json::to_vec(&serde_json::json!({
+        "command": verifier,
+        "exit_code": output.status.code().unwrap_or(1).clamp(0, 255),
+        "output_path": output_path.to_string_lossy(),
+    }))
+    .expect("a command list, an integer, and a path all serialise");
+    let verifier_record = verifier::recognise(&verifier_bytes)?;
+
+    code = decide_and_maybe_merge(
+        inv,
+        ui,
+        &roots,
+        &id,
+        &paths,
+        &mut rec,
+        verifier_record,
+        evidence,
+        true,
+    )?;
+    finish(inv, &paths.record, rec, code)
 }
 
 // ── CON-002 ────────────────────────────────────────────────────────────────
@@ -474,10 +628,18 @@ fn launch(
 ) -> Result<i32> {
     let (_roots, id, paths) = locate(inv, attempt)?;
     let rec = state::read_record(&paths.record)?;
-    do_launch(inv, ui, &id, &paths, rec, prompt, driver)
+    let (rec, code) = do_launch(inv, ui, &id, &paths, rec, prompt, driver, false)?;
+    finish(inv, &paths.record, rec, code)
 }
 
 /// The whole of `#CON-002`, taking the record its caller already read.
+/// Leaves `finish` to the caller — `spawn` may still have `--auto-merge` or
+/// `--force-merge` work to fold into the same record and the same one
+/// printed JSON document, and only the caller knows whether that's coming.
+/// `suppress_next_hint` silences the plain "run your verifier by hand"
+/// pointer when the caller (`spawn`, asked to auto/force-merge) is about to
+/// say something more specific instead.
+#[allow(clippy::too_many_arguments)]
 fn do_launch(
     inv: &mut Invoker,
     ui: Ui,
@@ -486,7 +648,8 @@ fn do_launch(
     mut rec: RunRecord,
     prompt: &Path,
     driver: &[String],
-) -> Result<i32> {
+    suppress_next_hint: bool,
+) -> Result<(RunRecord, i32)> {
     if rec.state != State::Prepared {
         return Err(Error::usage(format!(
             "attempt `{id}` is `{:?}` and cannot be launched; prepare a new attempt",
@@ -600,6 +763,8 @@ fn do_launch(
             "{id} failed: {} process(es) outlived the cleanup deadline",
             outcome.process_group_residue
         ));
+    } else if suppress_next_hint {
+        ui.hint("this says the agent stopped, not that its work is good");
     } else {
         ui.hint("this says the agent stopped, not that its work is good");
         ui.hint(&format!(
@@ -607,7 +772,7 @@ fn do_launch(
 --verifier-record <file> --evidence <ref>"
         ));
     }
-    finish(inv, &paths.record, rec, code)
+    Ok((rec, code))
 }
 
 // ── CON-003 ────────────────────────────────────────────────────────────────
@@ -618,8 +783,9 @@ fn accept(
     attempt: &str,
     verifier_record: &Path,
     evidence: &[String],
+    auto_merge: bool,
 ) -> Result<i32> {
-    let (_roots, id, paths) = locate(inv, attempt)?;
+    let (roots, id, paths) = locate(inv, attempt)?;
     let mut rec = state::read_record(&paths.record)?;
 
     if rec.state != State::Completed {
@@ -629,11 +795,6 @@ fn accept(
         )));
     }
 
-    let refs: Vec<EvidenceRef> = evidence
-        .iter()
-        .map(|r| EvidenceRef::recognise(r))
-        .collect::<std::result::Result<_, _>>()?;
-
     let bytes = std::fs::read(verifier_record).map_err(|e| {
         Error::usage(format!(
             "cannot read the verifier record at {}: {e}",
@@ -641,6 +802,37 @@ fn accept(
         ))
     })?;
     let verifier = verifier::recognise(&bytes)?;
+
+    let code = decide_and_maybe_merge(
+        inv, ui, &roots, &id, &paths, &mut rec, verifier, evidence, auto_merge,
+    )?;
+    finish(inv, &paths.record, rec, code)
+}
+
+/// The decision-and-maybe-merge core shared by `accept` and `spawn
+/// --auto-merge`: records the verifier and evidence, decides accepted or
+/// rejected, and — when `auto_merge` and accepted — folds a merge into the
+/// same `rec` too. The two callers differ only in where `verifier` came from
+/// (a file the caller already wrote, vs. one Circus just ran itself); this
+/// owns the mutation and the messaging. Never calls `finish` — exactly one
+/// call to that belongs to each caller, so stdout carries exactly one JSON
+/// document no matter how many things happened in the run.
+#[allow(clippy::too_many_arguments)]
+fn decide_and_maybe_merge(
+    inv: &mut Invoker,
+    ui: Ui,
+    roots: &Roots,
+    id: &AttemptId,
+    paths: &AttemptPaths,
+    rec: &mut RunRecord,
+    verifier: circus::core::verifier::VerifierRecord,
+    evidence: &[String],
+    auto_merge: bool,
+) -> Result<i32> {
+    let refs: Vec<EvidenceRef> = evidence
+        .iter()
+        .map(|r| EvidenceRef::recognise(r))
+        .collect::<std::result::Result<_, _>>()?;
 
     let decision = acceptance_decision(verifier.exit_code, &refs);
 
@@ -674,14 +866,16 @@ fn accept(
     };
     rec.timestamps.decided_at = Some(now_rfc3339());
 
-    let code = match decision {
+    let accepted = matches!(decision, Decision::Accepted);
+    match decision {
         Decision::Accepted => {
             ui.state(&format!("accepted {id}"));
-            ui.hint(&format!(
-                "next: circus merge --attempt {id} --into {}",
-                rec.integration_ref
-            ));
-            exit::OK
+            if !auto_merge {
+                ui.hint(&format!(
+                    "next: circus merge --attempt {id} --into {}",
+                    rec.integration_ref
+                ));
+            }
         }
         Decision::Rejected => {
             ui.state(&format!(
@@ -692,10 +886,77 @@ fn accept(
                 "the attempt is preserved at {}",
                 paths.worktree.display()
             ));
-            exit::REJECTED
         }
     };
-    finish(inv, &paths.record, rec, code)
+
+    if !(auto_merge && accepted) {
+        return Ok(if accepted { exit::OK } else { exit::REJECTED });
+    }
+
+    // `--auto-merge`: fold a merge into this same run rather than requiring
+    // a second `circus merge` invocation. `rec.integration_ref`
+    // is already the ref `git::recognise_ref` validated back at `prepare`
+    // time, so there is no untrusted `--into` here to re-recognise — unlike
+    // standalone `merge`, which takes one from the caller.
+    let into = rec.integration_ref.clone();
+    let cwd = cwd()?;
+    let report = apply_merge_to_record(inv, roots, &cwd, rec, &into)?;
+    let conflicted = report.outcome == MergeOutcome::Conflict;
+
+    if conflicted {
+        ui.state(&format!(
+            "{id} accepted, but conflicted merging into `{into}` in {}",
+            report.conflicts.join(", ")
+        ));
+        ui.hint(&format!(
+            "`{into}` is unchanged and the attempt is untouched"
+        ));
+        ui.hint("see docs/circus/how-to/how-to-resolve-a-merge-conflict.md");
+    } else {
+        let short = report
+            .commit
+            .as_deref()
+            .map_or("(unknown)", |c| c.get(..12).unwrap_or(c));
+        ui.state(&format!("merged {id} into `{into}` as {short}"));
+        ui.hint(&format!(
+            "the attempt is preserved; remove it with `git worktree remove {}`",
+            paths.worktree.display()
+        ));
+    }
+
+    Ok(if conflicted { exit::REJECTED } else { exit::OK })
+}
+
+/// The effectful core shared by `merge` and `accept --auto-merge`: locks the
+/// repo, plans the merge, applies it, and mutates `rec` to reflect the
+/// outcome. Never a dry run — `merge`'s own `--dry-run` branch returns before
+/// reaching here, and `--auto-merge` never previews, since a preview is a
+/// question and auto_merge is already an answer.
+///
+/// `#REQ-009`'s "the preview is the merge with the apply step omitted, so the
+/// two can never disagree" is what lets this read `report.outcome` — from the
+/// applied merge — as the one source of truth for whether it conflicted,
+/// rather than needing the caller to also carry a `MergePlan` around.
+fn apply_merge_to_record(
+    inv: &mut Invoker,
+    roots: &Roots,
+    cwd: &Path,
+    rec: &mut RunRecord,
+    into: &str,
+) -> Result<git::MergeReport> {
+    let _lock = state::lock(roots)?;
+    let plan = git::plan_merge(inv, cwd, into, &rec.branch)?;
+    let report = git::apply_merge(inv, cwd, into, &rec.branch, &plan)?;
+
+    if report.outcome != MergeOutcome::Conflict {
+        rec.state = State::Merged;
+        rec.timestamps.merged_at = Some(now_rfc3339());
+    }
+    rec.merge = Some(Merge {
+        result: report.outcome,
+        commit: report.commit.clone(),
+    });
+    Ok(report)
 }
 
 // ── CON-010 ────────────────────────────────────────────────────────────────
@@ -963,16 +1224,17 @@ fn merge(inv: &mut Invoker, ui: Ui, attempt: &str, into: &str, dry_run: bool) ->
     }
 
     let cwd = cwd()?;
-    let _lock = state::lock(&roots)?;
-
-    // One computation for both paths — `#REQ-009`. The preview is the merge
-    // with the apply step omitted, so the two can never disagree.
-    let plan = git::plan_merge(inv, &cwd, &into, &rec.branch)?;
-    let conflicted = plan.outcome == MergeOutcome::Conflict;
 
     if dry_run {
         // `#REQ-009.b` — no ref moves, no worktree is refreshed, and no record
-        // is written. The attempt is exactly as it was.
+        // is written. The attempt is exactly as it was. This is the only
+        // caller of `plan_merge` on its own; `apply_merge_to_record` below
+        // computes and applies a plan in one step for every real merge, per
+        // `#REQ-009`'s "the preview is the merge with the apply step
+        // omitted, so the two can never disagree".
+        let _lock = state::lock(&roots)?;
+        let plan = git::plan_merge(inv, &cwd, &into, &rec.branch)?;
+        let conflicted = plan.outcome == MergeOutcome::Conflict;
         if conflicted {
             ui.state(&format!(
                 "{id} would conflict with `{into}` in {}",
@@ -987,16 +1249,8 @@ fn merge(inv: &mut Invoker, ui: Ui, attempt: &str, into: &str, dry_run: bool) ->
         return Ok(if conflicted { exit::REJECTED } else { exit::OK });
     }
 
-    let report = git::apply_merge(inv, &cwd, &into, &rec.branch, &plan)?;
-
-    if !conflicted {
-        rec.state = State::Merged;
-        rec.timestamps.merged_at = Some(now_rfc3339());
-    }
-    rec.merge = Some(Merge {
-        result: report.outcome,
-        commit: report.commit.clone(),
-    });
+    let report = apply_merge_to_record(inv, &roots, &cwd, &mut rec, &into)?;
+    let conflicted = report.outcome == MergeOutcome::Conflict;
 
     if conflicted {
         ui.state(&format!(

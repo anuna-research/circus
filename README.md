@@ -82,6 +82,9 @@ circus accept --attempt model/1 --verifier-record v.json --evidence theory:spec-
 circus merge --attempt model/1 --into main
 ```
 
+Add `--auto-merge` to step 4 to fold step 5 into it — one run record instead of
+two, and only when acceptance actually succeeds.
+
 Or all of steps 1–3 at once, with the prompt composed for you:
 
 ```sh
