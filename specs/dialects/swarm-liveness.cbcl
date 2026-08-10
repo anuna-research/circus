@@ -1,0 +1,130 @@
+; cbcl-swarm-liveness: liveness and control notices for a leaderless swarm.
+;
+; Companion to `cbcl-usdd-work`, which already carries the bounded work-attempt
+; trail (offer, promise notice, progress, evidence, review).  This dialect adds
+; only what that trail cannot express: whether a peer is alive at all, which
+; peer means to claim next, and whether a human has asked the swarm to stop.
+;
+; Nothing here is authoritative.  The shared Elephant theory decides what is
+; claimed, done, and owed.  A beacon is an observation, a claim-intent is a
+; hint that shortens a contention window, and a halt withholds new claims
+; without terminating work already running.
+;
+; Each message is its own bounded thread.  A beacon repeats every period, so it
+; cannot sit on a causal chain with its predecessor without making the R5
+; protocol cyclic.  begin -> beacon is therefore terminal, and the same holds
+; for claim-intent.  Only halt -> resume is a genuine two-step exchange.
+;
+; Admission is deliberately absent.  An Elephant invite code is a secret and
+; Troupe must not carry, persist, or accept it.  Theory admission remains a
+; human, out-of-band ceremony until a genuine two-member E2EE carrier exists.
+;
+; See SPEC-002-leaderless-dispatch-loop#CON-003.
+
+(define cbcl-swarm-liveness (cbcl) @anuna-research
+  (:resource-requirements
+    ((max-depth 8)
+     (max-expansion-size 1024)
+     (verification-time 30)))
+
+  ; This peer instance is alive.  :holds lists the attempt identifiers it has
+  ; outstanding Elephant promises for.  :instance changes on process start and
+  ; :seq strictly increases within that instance.  :policy is the compatible
+  ; execution-policy fingerprint, not a secret.
+  (extend peer-beacon (theory peer instance seq holds policy)
+    (tell @swarm
+      :theory theory :peer peer :instance instance :seq seq :holds holds
+      :policy policy
+      :domain swarm-liveness))
+
+  ; This peer means to claim one new :attempt of :task, having computed :rank.
+  ; :decision ties the hint to the durable decision record.  :expires is a
+  ; duration no larger than two contention windows, interpreted from local
+  ; receipt time; no peer trusts a remote wall clock for freshness.  A lost
+  ; intent costs a duplicate attempt, never correctness.
+  (extend claim-intent (theory task attempt peer rank decision policy expires)
+    (tell @swarm
+      :theory theory :task task :attempt attempt :peer peer :rank rank
+      :decision decision :policy policy :expires expires
+      :domain swarm-liveness))
+
+  ; A channel member asks the swarm to take on no more work.  :by is the
+  ; member handle the wire verified, not a name the sender typed.  :id is a
+  ; fresh control identifier retained in every peer's durable control journal.
+  (extend swarm-halt (id by reason)
+    (tell @swarm
+      :id id :by by :reason reason
+      :domain swarm-liveness))
+
+  ; Release one halt.  :halt names its :id and :by must match the wire-verified
+  ; signer of that halt.
+  (extend swarm-resume (halt by)
+    (tell @swarm
+      :halt halt :by by
+      :domain swarm-liveness))
+
+  ; R5 causal trail.  Acyclic, fully reachable from begin.
+  ; A channel member that is not yet a member of :theory asks to be admitted.
+  ; A DID is not a secret, so this rides the room.  :wire binds the DID to the
+  ; signing key the hub verified, which is what makes a second DID under one
+  ; key detectable.
+  (extend join-request (theory peer wire decision)
+    (ask @swarm
+      :theory theory :peer peer :wire wire :decision decision
+      :domain swarm-liveness))
+
+  ; The admitting peer hands over a SPAKE2 invite code.  This is the one
+  ; message in the swarm carrying a secret, and it MUST ride the routed
+  ; transport point-to-point -- never the chat fan-out, where every current
+  ; member reads it and can mint a second DID.  The hub can read a routed
+  ; frame, so :expires is short and the code is single-use.  See
+  ; SPEC-002-leaderless-dispatch-loop#ADR-012.
+  (extend join-grant (theory peer code decision expires)
+    (reply @peer
+      :theory theory :peer peer :code code :decision decision :expires expires
+      :domain swarm-liveness))
+
+  (protocol
+    (then begin (any peer-beacon claim-intent swarm-halt join-request))
+    (then swarm-halt swarm-resume)
+    (then join-request join-grant))
+
+  (shape peer-beacon
+    (require :theory string)
+    (require :peer string)
+    (require :instance string)
+    (require :seq string)
+    (require :holds string)
+    (require :policy string))
+
+  (shape claim-intent
+    (require :theory string)
+    (require :task string)
+    (require :attempt string)
+    (require :peer string)
+    (require :rank string)
+    (require :decision string)
+    (require :policy string)
+    (require :expires string))
+
+  (shape swarm-halt
+    (require :id string)
+    (require :by string)
+    (require :reason string))
+
+  (shape swarm-resume
+    (require :halt string)
+    (require :by string))
+
+  (shape join-request
+    (require :theory string)
+    (require :peer string)
+    (require :wire string)
+    (require :decision string))
+
+  (shape join-grant
+    (require :theory string)
+    (require :peer string)
+    (require :code string)
+    (require :decision string)
+    (require :expires string)))
