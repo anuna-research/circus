@@ -143,13 +143,17 @@ jobs:
         run: |
           # The installer the curl one-liner fetches, shipped alongside the binaries.
           cp scripts/install.sh dist/install.sh
-          # The example drivers. install.sh does NOT install them: a driver is a
-          # choice, and SPEC-001-circus-agent-harness#REQ-007.b keeps provider
-          # knowledge out of circus itself. Publishing them makes the known-good
-          # ones fetchable without cloning.
+          # The example drivers. Provider knowledge stays out of the circus
+          # binary itself (SPEC-001-circus-agent-harness#REQ-007.b) — these are
+          # published as ordinary files a caller opts into, not something the
+          # binary knows about. install.sh does auto-install circus-driver-codex
+          # and circus-driver-claude (the two non-interactive, always-working
+          # ones) for onboarding; the checksums below are what it verifies them
+          # against, same as the binaries.
           mkdir -p dist/drivers
           cp drivers/circus-driver-* dist/drivers/
           cp drivers/README.md dist/drivers/README.md
+          ( cd dist/drivers && for f in circus-driver-*; do sha256sum "$f" > "$f.sha256"; done )
           cat > dist/version.json << EOF
           {
             "version": "${GITHUB_REF_NAME#v}",

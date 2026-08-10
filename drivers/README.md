@@ -5,8 +5,14 @@ the worktree, minted the sentinel, allocated the terminal, and wrapped the
 process in withdone, so a driver is usually one line.
 
 These four are examples, not a dependency. Nothing in the Circus binary knows
-they exist, and none of them is installed by `cargo install`. Copy the ones you
-want:
+they exist, and none of them is installed by `cargo install`.
+
+`scripts/install.sh` (the `curl | sh` installer) fetches `circus-driver-codex`
+and `circus-driver-claude` alongside the `circus` binary itself — they need
+nothing beyond an existing agent-CLI login, so there is no reason to make
+onboarding a second step. Set `CIRCUS_INSTALL_DRIVERS=0` to skip that. The
+other two (`circus-driver-opencode`, and `circus-driver-claude-tui` while it
+remains experimental) stay opt-in fetches, same as building from source:
 
 ```sh
 cp drivers/circus-driver-* ~/.local/bin/
