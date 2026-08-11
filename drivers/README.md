@@ -56,13 +56,35 @@ circus launch --attempt model/1 --prompt prompt.md -- circus-driver-codex -m o3
 | Driver | Agent | Billing | Notes |
 |---|---|---|---|
 | `circus-driver-codex` | `codex exec` | Codex subscription | Verified against codex-cli 0.146.1 |
-| `circus-driver-opencode` | `opencode run` | Provider key | Verified against opencode 1.14.48 |
+| `circus-driver-opencode` | `opencode run` | Provider key | Verified against opencode 1.18.16 — see [opencode model selection](#opencode-model-selection) |
 | `circus-driver-claude` | `claude --print` | Anthropic API | One-shot, non-interactive |
 | `circus-driver-claude-tui` | `claude` TUI | Claude subscription | **Experimental — does not work yet, see below** |
 
 Each passes the agent its "yes to everything" flag, without which the agent
 stops at its first approval prompt and the attempt burns its whole budget
 waiting for a keypress nobody will provide.
+
+## opencode model selection
+
+`circus-driver-opencode` picks a model/provider in three steps, first match wins:
+
+1. **`CIRCUS_DRIVER_MODEL`** — an explicit `provider/model` choice that beats
+   every other default:
+
+   ```sh
+   CIRCUS_DRIVER_MODEL=anthropic/claude-sonnet-4 \
+     circus launch --attempt model/1 --prompt prompt.md -- circus-driver-opencode
+   ```
+
+2. **A `-m`/`--model` in the forwarded args** (after the driver name) — passed
+   straight through to opencode untouched.
+
+3. **Last used model/provider** — the driver reads opencode's own session store
+   (`$XDG_DATA_HOME/opencode/opencode.db`, defaulting to
+   `~/.local/share/opencode`), takes the most recent session's model, and turns
+   its stored `{"providerID":…,"id":…}` into opencode's `provider/id` reference.
+   If no store can be read, opencode is launched without `-m` and uses its own
+   default.
 
 ## Writing your own
 
