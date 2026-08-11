@@ -146,10 +146,10 @@ jobs:
           # The example drivers. Provider knowledge stays out of the circus
           # binary itself (SPEC-001-circus-agent-harness#REQ-007.b) — these are
           # published as ordinary files a caller opts into, not something the
-          # binary knows about. install.sh does auto-install circus-driver-codex
-          # and circus-driver-claude (the two non-interactive, always-working
-          # ones) for onboarding; the checksums below are what it verifies them
-          # against, same as the binaries.
+          # binary knows about. install.sh does auto-install circus-driver-codex,
+          # circus-driver-claude, and circus-driver-opencode (the three
+          # non-interactive, always-working ones) for onboarding; the checksums
+          # below are what it verifies them against, same as the binaries.
           mkdir -p dist/drivers
           cp drivers/circus-driver-* dist/drivers/
           cp drivers/README.md dist/drivers/README.md

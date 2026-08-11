@@ -48,13 +48,16 @@ reap nothing where `/bin/sh` is dash — Debian and Ubuntu among them — so an
 attempt whose agent leaves a subprocess behind is failed by NFR-002 for
 survivors withdone was supposed to have killed.
 
-The example drivers are published alongside the binaries and are not installed
-for you — see [Drivers](#drivers) for why:
+The installer fetches three of the example drivers alongside the binary —
+`circus-driver-codex`, `circus-driver-claude`, and `circus-driver-opencode` —
+so `circus spawn ... -- circus-driver-codex` works right after install. Set
+`CIRCUS_INSTALL_DRIVERS=0` to skip that. The fourth, `circus-driver-claude-tui`,
+stays an opt-in fetch; see [Drivers](#drivers) for the split:
 
 ```sh
-curl -fsSL https://files.anuna.io/circus/drivers/circus-driver-codex \
-    -o ~/.local/bin/circus-driver-codex \
-    && chmod +x ~/.local/bin/circus-driver-codex
+curl -fsSL https://files.anuna.io/circus/drivers/circus-driver-claude-tui \
+    -o ~/.local/bin/circus-driver-claude-tui \
+    && chmod +x ~/.local/bin/circus-driver-claude-tui
 ```
 
 To build from source instead, see [Development](#development).

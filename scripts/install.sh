@@ -17,9 +17,10 @@
 # Supported artifacts:
 #   circus-darwin-arm64  circus-darwin-x64  circus-linux-x64  circus-linux-arm64
 #
-# Also installs circus-driver-codex and circus-driver-claude — the two
-# example drivers (of drivers/README.md's four) that run non-interactively
-# and need no extra setup beyond `codex login` / an Anthropic API key. This
+# Also installs circus-driver-codex, circus-driver-claude, and
+# circus-driver-opencode — the three example drivers (of drivers/README.md's
+# four) that run non-interactively and need no extra setup beyond an auth
+# login (`codex login` / an Anthropic API key / an opencode provider). This
 # does not put provider knowledge in the circus binary itself
 # (SPEC-001-circus-agent-harness#REQ-007.b is about the binary, not the
 # installer); it just means `circus spawn ... -- circus-driver-codex` works
@@ -42,7 +43,7 @@
 # Environment overrides:
 #   CIRCUS_BASE_URL        - artifact base URL (default: https://files.anuna.io/circus)
 #   CIRCUS_INSTALL_DIR     - install directory (default: ~/.local/bin)
-#   CIRCUS_INSTALL_DRIVERS - install circus-driver-codex/-claude too (default: 1)
+#   CIRCUS_INSTALL_DRIVERS - install the example drivers too (default: 1)
 #
 # Testing: `INSTALL_SH_TEST=1 . scripts/install.sh` sources the functions
 # without running the installation.
@@ -107,15 +108,15 @@ verify_checksum() {
 Delete the download and try again; if it persists, the artifact is wrong."
 }
 
-# The two drivers that work with nothing more than an auth login: no tmux
+# The three drivers that work with nothing more than an auth login: no tmux
 # TUI handling (circus-driver-claude-tui is experimental and broken — see
 # drivers/README.md), no provider API key juggling beyond what the agent CLI
-# itself already asks for. opencode and claude-tui stay opt-in fetches from
-# $BASE_URL/drivers/ for anyone who wants them.
+# itself already asks for. circus-driver-claude-tui stays an opt-in fetch from
+# $BASE_URL/drivers/ for anyone who wants it.
 install_drivers() {
     [ "$INSTALL_DRIVERS" = "1" ] || return 0
 
-    for _driver in circus-driver-codex circus-driver-claude; do
+    for _driver in circus-driver-codex circus-driver-claude circus-driver-opencode; do
         _dtmp=$(mktemp -d)
         if fetch "$BASE_URL/drivers/$_driver" "$_dtmp/$_driver" \
             && fetch "$BASE_URL/drivers/$_driver.sha256" "$_dtmp/$_driver.sha256"; then
@@ -196,8 +197,8 @@ main() {
     info ""
     info "Start here:  circus --help"
     if [ "$INSTALL_DRIVERS" = "1" ]; then
-        info "Drivers:     circus-driver-codex and circus-driver-claude installed."
-        info "             More at $BASE_URL/drivers/ (circus-driver-opencode, circus-driver-claude-tui)"
+        info "Drivers:     circus-driver-codex, circus-driver-claude, and circus-driver-opencode installed."
+        info "             More at $BASE_URL/drivers/ (circus-driver-claude-tui)"
     else
         info "Drivers:     $BASE_URL/drivers/"
     fi
