@@ -1,6 +1,59 @@
 #!/bin/sh
-# circus-driver-opencode — opencode, non-interactive.
+# circus-driver-opencode — opencode, non-interactive, one-shot.
 #
-# Extra arguments after the driver name are forwarded to opencode.
+# Circus has already opened the worktree, minted the sentinel, allocated the
+# PTY, and wrapped this process in withdone. All that is left is handing the
+# prompt to one agent CLI in the shape it expects.
+#
+# Auth: `opencode providers` / `opencode auth login`.
+#
+# Model/provider selection, in order of precedence:
+#   1. $CIRCUS_DRIVER_MODEL — an explicit "provider/model" choice that beats
+#      every other default. Set it from the caller, e.g.:
+#        CIRCUS_DRIVER_MODEL=anthropic/claude-sonnet-4 \
+#          circus launch --attempt model/1 --prompt prompt.md -- circus-driver-opencode
+#   2. A -m/--model the caller already placed in the args after the driver
+#      name — those pass straight through to opencode untouched.
+#   3. Otherwise default to the last used model/provider, read from opencode's
+#      own session store, so an attempt runs on whatever you last ran on.
+#
+# The store is a SQLite database; the most recent session's `model` column
+# holds a JSON object like {"id":"…","providerID":"…","variant":"…"} whose
+# opencode `-m` reference is providerID/id. If it cannot be read, opencode is
+# launched without -m and falls back to its own default.
 set -eu
-exec opencode run --dangerously-skip-permissions "$@" "$(cat "$CIRCUS_PROMPT")"
+
+model_ref=
+caller_model=
+
+for arg in "$@"; do
+    case "$arg" in
+        -m|--model|--model=*) caller_model=1 ;;
+    esac
+done
+
+if [ -n "${CIRCUS_DRIVER_MODEL:-}" ]; then
+    model_ref=$CIRCUS_DRIVER_MODEL
+elif [ -z "${caller_model:-}" ]; then
+    data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
+    db="$data_dir/opencode/opencode.db"
+    if command -v sqlite3 >/dev/null 2>&1 && [ -f "$db" ]; then
+        row=$(sqlite3 -noheader "$db" \
+            "SELECT model FROM session
+             WHERE model IS NOT NULL AND model != ''
+             ORDER BY time_updated DESC LIMIT 1;" 2>/dev/null || true)
+        if [ -n "$row" ]; then
+            provider_id=$(printf '%s' "$row" | sed -n 's/.*"providerID":"\([^"]*\)".*/\1/p')
+            id=$(printf '%s' "$row" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+            if [ -n "$id" ]; then
+                if [ -n "$provider_id" ]; then model_ref="$provider_id/$id"; else model_ref="$id"; fi
+            fi
+        fi
+    fi
+fi
+
+if [ -n "$model_ref" ]; then
+    exec opencode run --dangerously-skip-permissions "$@" -m "$model_ref" "$(cat "$CIRCUS_PROMPT")"
+else
+    exec opencode run --dangerously-skip-permissions "$@" "$(cat "$CIRCUS_PROMPT")"
+fi
